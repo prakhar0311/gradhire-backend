@@ -104,6 +104,7 @@ async def optimize_resume(payload: dict):
     }
 
 # -------- SMART JOB SEARCH --------
+# -------- SMART JOB SEARCH --------
 @app.post("/jobs/from-resume")
 async def jobs_from_resume(
     file: UploadFile = File(...),
@@ -117,15 +118,27 @@ async def jobs_from_resume(
             if page.extract_text():
                 text += page.extract_text()
 
+    # 1️⃣ Resume-based keyword
     query = extract_keywords(text)
 
     try:
+        # 2️⃣ First attempt: resume-based search
         jobs = fetch_jobs(
             query=query,
             country=country,
             resume_text=text
         )
+
+        # 3️⃣ FALLBACK: broad search if nothing found
+        if not jobs:
+            jobs = fetch_jobs(
+                query="software engineer",
+                country=country,
+                resume_text=text
+            )
+
         return jobs
-    except Exception:
-        # ⚠️ CRITICAL: always return list for Swift
+
+    except Exception as e:
+        print("Job search failed:", e)
         return []
