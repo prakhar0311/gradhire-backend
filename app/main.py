@@ -118,27 +118,31 @@ async def jobs_from_resume(
             if page.extract_text():
                 text += page.extract_text()
 
-    # 1️⃣ Resume-based keyword
     query = extract_keywords(text)
 
+    print("🔍 Resume keyword:", query)
+
     try:
-        # 2️⃣ First attempt: resume-based search
         jobs = fetch_jobs(
             query=query,
             country=country,
             resume_text=text
         )
 
-        # 3️⃣ FALLBACK: broad search if nothing found
-        if not jobs:
+        print("📊 First fetch jobs:", len(jobs))
+
+        # 🔥 FORCE fallback if India returns nothing
+        if not jobs and country == "in":
             jobs = fetch_jobs(
                 query="software engineer",
                 country=country,
                 resume_text=text
             )
+            print("📊 Fallback jobs:", len(jobs))
 
         return jobs
 
     except Exception as e:
-        print("Job search failed:", e)
+        print("❌ Job search failed:", str(e))
         return []
+
