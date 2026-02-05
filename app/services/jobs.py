@@ -10,6 +10,10 @@ load_dotenv()
 ADZUNA_APP_ID = os.getenv("ADZUNA_APP_ID")
 ADZUNA_API_KEY = os.getenv("ADZUNA_API_KEY")
 
+# -------- CONFIG --------
+REQUEST_TIMEOUT = 5  # seconds
+MAX_DESCRIPTION_LENGTH = 2000
+
 # -------- STOPWORDS --------
 STOPWORDS = {
     "the", "and", "to", "a", "of", "in", "for", "with",
@@ -61,6 +65,17 @@ def compute_match_score(resume_text: str, job_text: str):
 
     return base + random.randint(0, 10)
 
+# -------- CLEAN DESCRIPTION --------
+def clean_description(text: str):
+    if not text:
+        return ""
+
+    # Remove excessive whitespace
+    text = re.sub(r"\s+", " ", text).strip()
+
+    # Limit length
+    return text[:MAX_DESCRIPTION_LENGTH]
+
 # -------- FETCH JOBS --------
 def fetch_jobs(
     query: str,
@@ -68,8 +83,10 @@ def fetch_jobs(
     limit: int = 10,
     resume_text: str = ""
 ):
+
     if not ADZUNA_APP_ID or not ADZUNA_API_KEY:
-        raise Exception("Adzuna API keys not set")
+        print("❌ Missing Adzuna API keys")
+        return []
 
     url = f"https://api.adzuna.com/v1/api/jobs/{country}/search/1"
 
@@ -80,14 +97,27 @@ def fetch_jobs(
         "results_per_page": limit,
     }
 
-    response = requests.get(url, params=params)
-    response.raise_for_status()
+    try:
+        response = requests.get(
+            url,
+            params=params,
+            timeout=REQUEST_TIMEOUT
+        )
 
-    data = response.json()
+        response.raise_for_status()
+        data = response.json()
+
+    except requests.exceptions.RequestException as e:
+        print("❌ Adzuna request failed:", str(e))
+        return []
+
     jobs = []
 
     for job in data.get("results", []):
-        description = job.get("description", "")
+
+        description = clean_description(
+            job.get("description", "")
+        )
 
         # 🇺🇸 Visa filter only for US
         if country == "us" and not is_visa_friendly(description):
@@ -96,12 +126,11 @@ def fetch_jobs(
         score = compute_match_score(resume_text, description)
 
         jobs.append({
-            # ✅ EXACT Swift-compatible schema
             "id": str(uuid.uuid4()),
             "title": job.get("title") or "Unknown",
             "company": job.get("company", {}).get("display_name") or "Unknown",
             "location": job.get("location", {}).get("display_name") or "Remote",
-            "description": description or "",
+            "description": description,
             "matchScore": int(score),
             "applyURL": job.get("redirect_url") or ""
         })

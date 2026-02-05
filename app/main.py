@@ -1,4 +1,4 @@
-from fastapi import FastAPI, UploadFile, File, Query
+from fastapi import FastAPI, UploadFile, File, Query, HTTPException
 from dotenv import load_dotenv
 import pdfplumber
 import io
@@ -10,6 +10,10 @@ from app.services.jobs import fetch_jobs
 load_dotenv(dotenv_path=os.path.join(os.getcwd(), ".env"))
 
 app = FastAPI()
+
+# -------- CONFIG --------
+MAX_FILE_SIZE = 5 * 1024 * 1024  # 5MB
+ALLOWED_COUNTRIES = {"in", "us"}
 
 # -------- KEYWORD EXTRACTION --------
 def extract_keywords(text: str):
@@ -32,16 +36,55 @@ def extract_keywords(text: str):
 def root():
     return {"message": "GradHire backend running 🚀"}
 
-# -------- UPLOAD + PARSE RESUME --------
+# -------- VALIDATE PDF --------
+def validate_pdf(file: UploadFile, content: bytes):
+
+    if not file.filename.lower().endswith(".pdf"):
+        raise HTTPException(
+            status_code=400,
+            detail="Only PDF files are accepted"
+        )
+
+    if len(content) > MAX_FILE_SIZE:
+        raise HTTPException(
+            status_code=400,
+            detail="File too large (max 5MB)"
+        )
+
+# -------- PARSE PDF --------
+def extract_pdf_text(content: bytes):
+
+    try:
+        text = ""
+
+        with pdfplumber.open(io.BytesIO(content)) as pdf:
+            for page in pdf.pages:
+                extracted = page.extract_text()
+                if extracted:
+                    text += extracted
+
+        if not text.strip():
+            raise HTTPException(
+                status_code=400,
+                detail="Resume text could not be extracted"
+            )
+
+        return text
+
+    except Exception:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid or corrupted PDF file"
+        )
+
+# -------- UPLOAD ENDPOINT --------
 @app.post("/resume/upload")
 async def upload_resume(file: UploadFile = File(...)):
+
     content = await file.read()
 
-    text = ""
-    with pdfplumber.open(io.BytesIO(content)) as pdf:
-        for page in pdf.pages:
-            if page.extract_text():
-                text += page.extract_text() + "\n"
+    validate_pdf(file, content)
+    text = extract_pdf_text(content)
 
     return {
         "filename": file.filename,
@@ -50,7 +93,7 @@ async def upload_resume(file: UploadFile = File(...)):
         "text": text
     }
 
-# -------- RESUME OPTIMIZATION (MOCK) --------
+# -------- RESUME OPTIMIZATION --------
 @app.post("/resume/optimize")
 async def optimize_resume(payload: dict):
 
@@ -58,7 +101,10 @@ async def optimize_resume(payload: dict):
     job = payload.get("job_description", "").lower()
 
     if not resume or not job:
-        return {"error": "Missing resume or job description"}
+        raise HTTPException(
+            status_code=400,
+            detail="Missing resume or job description"
+        )
 
     common_skills = [
         "python", "java", "react", "swift", "aws", "docker",
@@ -103,24 +149,25 @@ async def optimize_resume(payload: dict):
         "ats_keywords": ats_keywords[:6]
     }
 
-# -------- SMART JOB SEARCH --------
-# -------- SMART JOB SEARCH --------
+# -------- JOB SEARCH --------
 @app.post("/jobs/from-resume")
 async def jobs_from_resume(
     file: UploadFile = File(...),
     country: str = Query("in")
 ):
+
+    if country not in ALLOWED_COUNTRIES:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid country"
+        )
+
     content = await file.read()
 
-    text = ""
-    with pdfplumber.open(io.BytesIO(content)) as pdf:
-        for page in pdf.pages:
-            if page.extract_text():
-                text += page.extract_text()
+    validate_pdf(file, content)
+    text = extract_pdf_text(content)
 
     query = extract_keywords(text)
-
-    print("🔍 Resume keyword:", query)
 
     try:
         jobs = fetch_jobs(
@@ -129,20 +176,15 @@ async def jobs_from_resume(
             resume_text=text
         )
 
-        print("📊 First fetch jobs:", len(jobs))
-
-        # 🔥 FORCE fallback if India returns nothing
         if not jobs and country == "in":
             jobs = fetch_jobs(
                 query="software engineer",
                 country=country,
                 resume_text=text
             )
-            print("📊 Fallback jobs:", len(jobs))
 
         return jobs
 
-    except Exception as e:
-        print("❌ Job search failed:", str(e))
+    except Exception:
+        # Never crash backend
         return []
-
