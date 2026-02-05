@@ -3,6 +3,7 @@ from dotenv import load_dotenv
 import pdfplumber
 import io
 import os
+import re
 
 from app.services.jobs import fetch_jobs
 
@@ -13,30 +14,43 @@ app = FastAPI()
 
 # -------- CONFIG --------
 MAX_FILE_SIZE = 5 * 1024 * 1024  # 5MB
-ALLOWED_COUNTRIES = {"in", "us"}
 
 # -------- RESUME DETECTION --------
-def is_resume_text(text: str) -> bool:
+
+RESUME_KEYWORDS = [
+    "experience", "education", "skills", "projects",
+    "work experience", "professional experience",
+    "software", "engineer", "developer",
+    "university", "bachelor", "master",
+    "python", "java", "react", "swift"
+]
+
+NON_RESUME_KEYWORDS = [
+    "boarding pass", "flight", "gate", "seat",
+    "invoice", "receipt", "ticket", "payment",
+    "tax", "bank", "statement"
+]
+
+def is_valid_resume(text: str):
+
+    if not text or len(text) < 200:
+        return False
+
     text_lower = text.lower()
 
-    resume_keywords = [
-        "experience", "education", "skills", "projects",
-        "university", "developer", "engineer",
-        "github", "linkedin"
-    ]
+    resume_score = sum(
+        1 for k in RESUME_KEYWORDS if k in text_lower
+    )
 
-    non_resume_keywords = [
-        "flight", "boarding", "seat", "terminal",
-        "invoice", "receipt", "ticket", "pnr"
-    ]
+    non_resume_score = sum(
+        1 for k in NON_RESUME_KEYWORDS if k in text_lower
+    )
 
-    resume_score = sum(k in text_lower for k in resume_keywords)
-    non_resume_score = sum(k in text_lower for k in non_resume_keywords)
-
-    return resume_score >= 2 and non_resume_score == 0
-
+    # Resume must strongly outweigh non-resume signals
+    return resume_score >= 3 and non_resume_score == 0
 
 # -------- KEYWORD EXTRACTION --------
+
 def extract_keywords(text: str):
     keywords = [
         "ios", "swift", "frontend", "react",
@@ -53,140 +67,96 @@ def extract_keywords(text: str):
     return "software engineer"
 
 # -------- ROOT --------
+
 @app.get("/")
 def root():
     return {"message": "GradHire backend running 🚀"}
 
-# -------- VALIDATE PDF --------
-def validate_pdf(file: UploadFile, content: bytes):
+# -------- UPLOAD + VALIDATION --------
+
+@app.post("/resume/upload")
+async def upload_resume(file: UploadFile = File(...)):
 
     if not file.filename.lower().endswith(".pdf"):
         raise HTTPException(
             status_code=400,
-            detail="Only PDF files are accepted"
+            detail="Only PDF resumes are allowed"
         )
+
+    content = await file.read()
 
     if len(content) > MAX_FILE_SIZE:
         raise HTTPException(
             status_code=400,
-            detail="File too large (max 5MB)"
+            detail="Resume too large (max 5MB)"
         )
 
-# -------- PARSE PDF --------
-def extract_pdf_text(content: bytes):
+    text = ""
 
     try:
-        text = ""
-
         with pdfplumber.open(io.BytesIO(content)) as pdf:
             for page in pdf.pages:
-                extracted = page.extract_text()
-                if extracted:
-                    text += extracted
-
-        if not text.strip():
-            raise HTTPException(
-                status_code=400,
-                detail="Resume text could not be extracted"
-            )
-
-        return text
-
+                if page.extract_text():
+                    text += page.extract_text() + "\n"
     except Exception:
         raise HTTPException(
             status_code=400,
-            detail="Invalid or corrupted PDF file"
+            detail="Invalid PDF file"
         )
 
-# -------- UPLOAD ENDPOINT --------
-@app.post("/resume/upload")
-async def upload_resume(file: UploadFile = File(...)):
-
-    content = await file.read()
-
-    validate_pdf(file, content)
-    text = extract_pdf_text(content)
+    if not is_valid_resume(text):
+        raise HTTPException(
+            status_code=400,
+            detail="This document does not appear to be a resume"
+        )
 
     return {
         "filename": file.filename,
         "size": len(content),
-        "status": "uploaded successfully",
+        "status": "resume validated",
         "text": text
     }
 
-# -------- RESUME OPTIMIZATION --------
-@app.post("/resume/optimize")
-async def optimize_resume(payload: dict):
+# -------- SMART JOB SEARCH --------
 
-    resume = payload.get("resume_text", "").lower()
-    job = payload.get("job_description", "").lower()
-
-    if not resume or not job:
-        raise HTTPException(
-            status_code=400,
-            detail="Missing resume or job description"
-        )
-
-    common_skills = [
-        "python", "java", "react", "swift", "aws", "docker",
-        "kubernetes", "sql", "javascript", "typescript",
-        "ci/cd", "git", "rest", "api", "microservices"
-    ]
-
-    missing_skills = [
-        skill.upper()
-        for skill in common_skills
-        if skill in job and skill not in resume
-    ]
-
-    if not missing_skills:
-        missing_skills = ["Leadership", "System Design"]
-
-    improved_bullets = []
-
-    if "react" in resume:
-        improved_bullets.append(
-            "Developed high-performance React applications with reusable components."
-        )
-
-    if "python" in resume:
-        improved_bullets.append(
-            "Built scalable backend services using Python and REST APIs."
-        )
-
-    if not improved_bullets:
-        improved_bullets = [
-            "Built scalable applications following best coding practices.",
-            "Collaborated with teams to deliver high-quality features."
-        ]
-
-    ats_keywords = list(set(
-        missing_skills[:3] + ["Agile", "APIs", "Cloud", "Engineering"]
-    ))
-
-    return {
-        "missing_skills": missing_skills[:5],
-        "improved_bullets": improved_bullets[:5],
-        "ats_keywords": ats_keywords[:6]
-    }
-
-# -------- JOB SEARCH --------
 @app.post("/jobs/from-resume")
 async def jobs_from_resume(
     file: UploadFile = File(...),
     country: str = Query("in")
 ):
 
-    if country not in ALLOWED_COUNTRIES:
+    if not file.filename.lower().endswith(".pdf"):
         raise HTTPException(
             status_code=400,
-            detail="Invalid country"
+            detail="Only PDF resumes are allowed"
         )
 
     content = await file.read()
 
-    validate_pdf(file, content)
-    text = extract_pdf_text(content)
+    if len(content) > MAX_FILE_SIZE:
+        raise HTTPException(
+            status_code=400,
+            detail="Resume too large (max 5MB)"
+        )
+
+    text = ""
+
+    try:
+        with pdfplumber.open(io.BytesIO(content)) as pdf:
+            for page in pdf.pages:
+                if page.extract_text():
+                    text += page.extract_text()
+    except Exception:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid PDF file"
+        )
+
+    if not is_valid_resume(text):
+        raise HTTPException(
+            status_code=400,
+            detail="This document does not appear to be a resume"
+        )
 
     query = extract_keywords(text)
 
@@ -207,5 +177,4 @@ async def jobs_from_resume(
         return jobs
 
     except Exception:
-        # Never crash backend
         return []
