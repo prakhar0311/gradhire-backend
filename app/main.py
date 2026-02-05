@@ -15,6 +15,27 @@ app = FastAPI()
 MAX_FILE_SIZE = 5 * 1024 * 1024  # 5MB
 ALLOWED_COUNTRIES = {"in", "us"}
 
+# -------- RESUME DETECTION --------
+def is_resume_text(text: str) -> bool:
+    text_lower = text.lower()
+
+    resume_keywords = [
+        "experience", "education", "skills", "projects",
+        "university", "developer", "engineer",
+        "github", "linkedin"
+    ]
+
+    non_resume_keywords = [
+        "flight", "boarding", "seat", "terminal",
+        "invoice", "receipt", "ticket", "pnr"
+    ]
+
+    resume_score = sum(k in text_lower for k in resume_keywords)
+    non_resume_score = sum(k in text_lower for k in non_resume_keywords)
+
+    return resume_score >= 2 and non_resume_score == 0
+
+
 # -------- KEYWORD EXTRACTION --------
 def extract_keywords(text: str):
     keywords = [
