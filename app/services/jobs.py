@@ -13,6 +13,7 @@ ADZUNA_API_KEY = os.getenv("ADZUNA_API_KEY")
 # -------- CONFIG --------
 REQUEST_TIMEOUT = 5  # seconds
 MAX_DESCRIPTION_LENGTH = 2000
+MAX_JOBS_RETURNED = 20
 
 # -------- STOPWORDS --------
 STOPWORDS = {
@@ -30,19 +31,26 @@ VISA_KEYWORDS = [
     "relocation"
 ]
 
-def is_visa_friendly(description: str):
+def is_visa_friendly(description: str) -> bool:
+    if not description:
+        return False
     return any(word in description.lower() for word in VISA_KEYWORDS)
 
-# -------- TEXT HELPERS --------
+# -------- TEXT TOKENIZER --------
 def tokenize(text: str):
+    if not text:
+        return set()
+
     words = re.findall(r"\b\w+\b", text.lower())
+
     return {
         w for w in words
         if w not in STOPWORDS and len(w) > 2
     }
 
 # -------- MATCH SCORE --------
-def compute_match_score(resume_text: str, job_text: str):
+def compute_match_score(resume_text: str, job_text: str) -> int:
+
     resume_words = tokenize(resume_text)
     job_words = tokenize(job_text)
 
@@ -63,18 +71,21 @@ def compute_match_score(resume_text: str, job_text: str):
     else:
         base = 25
 
-    return base + random.randint(0, 10)
+    # small randomness so scores don’t look robotic
+    return min(100, base + random.randint(0, 8))
 
 # -------- CLEAN DESCRIPTION --------
-def clean_description(text: str):
+def clean_description(text: str) -> str:
+
     if not text:
         return ""
 
-    # Remove excessive whitespace
     text = re.sub(r"\s+", " ", text).strip()
 
-    # Limit length
-    return text[:MAX_DESCRIPTION_LENGTH]
+    if len(text) > MAX_DESCRIPTION_LENGTH:
+        text = text[:MAX_DESCRIPTION_LENGTH] + "..."
+
+    return text
 
 # -------- FETCH JOBS --------
 def fetch_jobs(
@@ -94,7 +105,7 @@ def fetch_jobs(
         "app_id": ADZUNA_APP_ID,
         "app_key": ADZUNA_API_KEY,
         "what": query,
-        "results_per_page": limit,
+        "results_per_page": min(limit, MAX_JOBS_RETURNED),
     }
 
     try:
@@ -107,6 +118,10 @@ def fetch_jobs(
         response.raise_for_status()
         data = response.json()
 
+    except requests.exceptions.Timeout:
+        print("⏱ Adzuna timeout")
+        return []
+
     except requests.exceptions.RequestException as e:
         print("❌ Adzuna request failed:", str(e))
         return []
@@ -115,25 +130,34 @@ def fetch_jobs(
 
     for job in data.get("results", []):
 
-        description = clean_description(
-            job.get("description", "")
-        )
+        try:
+            description = clean_description(
+                job.get("description", "")
+            )
 
-        # 🇺🇸 Visa filter only for US
-        if country == "us" and not is_visa_friendly(description):
+            # 🇺🇸 Visa filter (US only)
+            if country == "us" and not is_visa_friendly(description):
+                continue
+
+            score = compute_match_score(
+                resume_text,
+                description
+            )
+
+            jobs.append({
+                "id": str(uuid.uuid4()),
+                "title": job.get("title") or "Unknown",
+                "company": job.get("company", {}).get("display_name") or "Unknown",
+                "location": job.get("location", {}).get("display_name") or "Remote",
+                "description": description,
+                "matchScore": int(score),
+                "applyURL": job.get("redirect_url") or ""
+            })
+
+        except Exception as e:
+            print("⚠️ Skipping bad job entry:", str(e))
             continue
 
-        score = compute_match_score(resume_text, description)
-
-        jobs.append({
-            "id": str(uuid.uuid4()),
-            "title": job.get("title") or "Unknown",
-            "company": job.get("company", {}).get("display_name") or "Unknown",
-            "location": job.get("location", {}).get("display_name") or "Remote",
-            "description": description,
-            "matchScore": int(score),
-            "applyURL": job.get("redirect_url") or ""
-        })
-
     jobs.sort(key=lambda x: x["matchScore"], reverse=True)
+
     return jobs

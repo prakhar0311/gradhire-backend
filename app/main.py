@@ -3,8 +3,10 @@ from dotenv import load_dotenv
 import pdfplumber
 import io
 import os
+import json
 import re
 
+from app.services.ai_optimizer import optimize_resume_ai
 from app.services.jobs import fetch_jobs
 
 # -------- LOAD ENV --------
@@ -14,6 +16,7 @@ app = FastAPI()
 
 # -------- CONFIG --------
 MAX_FILE_SIZE = 5 * 1024 * 1024  # 5MB
+ALLOWED_COUNTRIES = {"in", "us"}
 
 # -------- RESUME DETECTION --------
 
@@ -31,27 +34,52 @@ NON_RESUME_KEYWORDS = [
     "tax", "bank", "statement"
 ]
 
-def is_valid_resume(text: str):
+def is_valid_resume(text: str) -> bool:
+    text = text.strip()
 
-    if not text or len(text) < 200:
+    if len(text) < 200:
         return False
 
     text_lower = text.lower()
 
-    resume_score = sum(
-        1 for k in RESUME_KEYWORDS if k in text_lower
-    )
+    resume_score = sum(k in text_lower for k in RESUME_KEYWORDS)
+    non_resume_score = sum(k in text_lower for k in NON_RESUME_KEYWORDS)
 
-    non_resume_score = sum(
-        1 for k in NON_RESUME_KEYWORDS if k in text_lower
-    )
-
-    # Resume must strongly outweigh non-resume signals
     return resume_score >= 3 and non_resume_score == 0
+
+# -------- PDF EXTRACTION HELPER --------
+
+async def extract_resume_text(file: UploadFile) -> str:
+
+    if not file.filename.lower().endswith(".pdf"):
+        raise HTTPException(400, "Only PDF resumes are allowed")
+
+    content = await file.read()
+
+    if len(content) > MAX_FILE_SIZE:
+        raise HTTPException(400, "Resume too large (max 5MB)")
+
+    try:
+        text = ""
+        with pdfplumber.open(io.BytesIO(content)) as pdf:
+            for page in pdf.pages:
+                extracted = page.extract_text()
+                if extracted:
+                    text += extracted + "\n"
+    except Exception:
+        raise HTTPException(400, "Invalid PDF file")
+
+    if not is_valid_resume(text):
+        raise HTTPException(
+            400,
+            "This document does not appear to be a resume"
+        )
+
+    return text
 
 # -------- KEYWORD EXTRACTION --------
 
-def extract_keywords(text: str):
+def extract_keywords(text: str) -> str:
     keywords = [
         "ios", "swift", "frontend", "react",
         "backend", "python", "java",
@@ -72,52 +100,20 @@ def extract_keywords(text: str):
 def root():
     return {"message": "GradHire backend running 🚀"}
 
-# -------- UPLOAD + VALIDATION --------
+# -------- UPLOAD --------
 
 @app.post("/resume/upload")
 async def upload_resume(file: UploadFile = File(...)):
 
-    if not file.filename.lower().endswith(".pdf"):
-        raise HTTPException(
-            status_code=400,
-            detail="Only PDF resumes are allowed"
-        )
-
-    content = await file.read()
-
-    if len(content) > MAX_FILE_SIZE:
-        raise HTTPException(
-            status_code=400,
-            detail="Resume too large (max 5MB)"
-        )
-
-    text = ""
-
-    try:
-        with pdfplumber.open(io.BytesIO(content)) as pdf:
-            for page in pdf.pages:
-                if page.extract_text():
-                    text += page.extract_text() + "\n"
-    except Exception:
-        raise HTTPException(
-            status_code=400,
-            detail="Invalid PDF file"
-        )
-
-    if not is_valid_resume(text):
-        raise HTTPException(
-            status_code=400,
-            detail="This document does not appear to be a resume"
-        )
+    text = await extract_resume_text(file)
 
     return {
         "filename": file.filename,
-        "size": len(content),
         "status": "resume validated",
         "text": text
     }
 
-# -------- SMART JOB SEARCH --------
+# -------- JOB SEARCH --------
 
 @app.post("/jobs/from-resume")
 async def jobs_from_resume(
@@ -125,38 +121,10 @@ async def jobs_from_resume(
     country: str = Query("in")
 ):
 
-    if not file.filename.lower().endswith(".pdf"):
-        raise HTTPException(
-            status_code=400,
-            detail="Only PDF resumes are allowed"
-        )
+    if country not in ALLOWED_COUNTRIES:
+        raise HTTPException(400, "Unsupported country")
 
-    content = await file.read()
-
-    if len(content) > MAX_FILE_SIZE:
-        raise HTTPException(
-            status_code=400,
-            detail="Resume too large (max 5MB)"
-        )
-
-    text = ""
-
-    try:
-        with pdfplumber.open(io.BytesIO(content)) as pdf:
-            for page in pdf.pages:
-                if page.extract_text():
-                    text += page.extract_text()
-    except Exception:
-        raise HTTPException(
-            status_code=400,
-            detail="Invalid PDF file"
-        )
-
-    if not is_valid_resume(text):
-        raise HTTPException(
-            status_code=400,
-            detail="This document does not appear to be a resume"
-        )
+    text = await extract_resume_text(file)
 
     query = extract_keywords(text)
 
@@ -178,3 +146,44 @@ async def jobs_from_resume(
 
     except Exception:
         return []
+
+# -------- SAFE AI JSON PARSER --------
+
+def parse_ai_json(text: str) -> dict:
+    match = re.search(r"\{.*\}", text, re.DOTALL)
+    if not match:
+        raise ValueError("Invalid AI response")
+
+    return json.loads(match.group())
+
+# -------- RESUME OPTIMIZATION --------
+
+@app.post("/resume/optimize")
+async def optimize_resume(payload: dict):
+
+    resume = payload.get("resume_text", "").strip()
+    job = payload.get("job_description", "").strip()
+
+    if not resume or not job:
+        raise HTTPException(400, "Missing resume or job description")
+
+    try:
+        ai_response = optimize_resume_ai(resume, job)
+        parsed = parse_ai_json(ai_response)
+
+        return {
+            "missing_skills": parsed.get("missing_skills", []),
+            "improved_bullets": parsed.get("improved_bullets", []),
+            "ats_keywords": parsed.get("ats_keywords", [])
+        }
+
+    except Exception as e:
+        print("❌ AI optimization failed:", str(e))
+
+        return {
+            "missing_skills": [],
+            "improved_bullets": [
+                "Optimization temporarily unavailable. Please try again."
+            ],
+            "ats_keywords": []
+        }
