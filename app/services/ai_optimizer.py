@@ -52,15 +52,25 @@ Job description:
 {job_description[:MAX_TEXT_LENGTH]}
 """
                 }
-            ],
-            temperature=0.2,
-            timeout=20  # seconds
+            ]
         )
 
         content = response.choices[0].message.content.strip()
 
-        # Validate JSON before returning
-        parsed = json.loads(content)
+        # Try parsing JSON safely
+        try:
+            parsed = json.loads(content)
+        except json.JSONDecodeError:
+            print("⚠️ Invalid JSON from OpenAI:", content)
+
+            # Safe fallback
+            parsed = {
+                "missing_skills": [],
+                "improved_bullets": [
+                    "AI response formatting issue. Please retry."
+                ],
+                "ats_keywords": []
+            }
 
         # Ensure required keys exist
         return json.dumps({
