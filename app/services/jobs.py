@@ -71,7 +71,6 @@ def compute_match_score(resume_text: str, job_text: str) -> int:
     else:
         base = 25
 
-    # small randomness so scores don’t look robotic
     return min(100, base + random.randint(0, 8))
 
 # -------- CLEAN DESCRIPTION --------
@@ -87,11 +86,53 @@ def clean_description(text: str) -> str:
 
     return text
 
+# -------- ENTRY LEVEL FILTER --------
+
+ENTRY_LEVEL_KEYWORDS = [
+    "junior",
+    "entry level",
+    "graduate",
+    "fresher",
+    "intern",
+    "trainee",
+    "associate",
+    "new grad",
+    "0-2",
+    "0 – 2",
+]
+
+SENIOR_KEYWORDS = [
+    "senior",
+    "lead",
+    "principal",
+    "staff",
+    "manager",
+    "architect",
+    "5+",
+    "6+",
+    "7+",
+]
+
+def is_entry_level(title: str, description: str) -> bool:
+
+    text = f"{title} {description}".lower()
+
+    # Reject obvious senior roles
+    if any(word in text for word in SENIOR_KEYWORDS):
+        return False
+
+    # Accept if entry signals exist
+    if any(word in text for word in ENTRY_LEVEL_KEYWORDS):
+        return True
+
+    # Default allow if no senior signal detected
+    return True
+
 # -------- FETCH JOBS --------
 def fetch_jobs(
     query: str,
     country: str = "in",
-    limit: int = 10,
+    limit: int = 20,
     resume_text: str = ""
 ):
 
@@ -131,9 +172,14 @@ def fetch_jobs(
     for job in data.get("results", []):
 
         try:
-            description = clean_description(
-                job.get("description", "")
-            )
+            title = job.get("title", "")
+            description_raw = job.get("description", "")
+
+            # 🔥 NEW GRAD FILTER
+            if not is_entry_level(title, description_raw):
+                continue
+
+            description = clean_description(description_raw)
 
             # 🇺🇸 Visa filter (US only)
             if country == "us" and not is_visa_friendly(description):
@@ -146,7 +192,7 @@ def fetch_jobs(
 
             jobs.append({
                 "id": str(uuid.uuid4()),
-                "title": job.get("title") or "Unknown",
+                "title": title or "Unknown",
                 "company": job.get("company", {}).get("display_name") or "Unknown",
                 "location": job.get("location", {}).get("display_name") or "Remote",
                 "description": description,
