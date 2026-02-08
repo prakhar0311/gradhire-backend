@@ -8,6 +8,7 @@ import re
 
 from app.services.ai_optimizer import optimize_resume_ai
 from app.services.jobs import fetch_jobs
+from app.services.domain_classifier import generate_job_query
 
 # -------- LOAD ENV --------
 load_dotenv(dotenv_path=os.path.join(os.getcwd(), ".env"))
@@ -20,6 +21,7 @@ ALLOWED_COUNTRIES = {"in", "us"}
 
 # -------- RESUME DETECTION --------
 
+# General resume signals (any industry)
 RESUME_KEYWORDS = [
     "experience",
     "education",
@@ -27,14 +29,29 @@ RESUME_KEYWORDS = [
     "projects",
     "summary",
     "professional",
-    "work",
+    "work experience",
     "university",
     "bachelor",
     "master",
     "degree",
     "intern",
+]
+
+# Engineering signals (covers ALL engineering domains)
+ENGINEERING_KEYWORDS = [
     "engineer",
-    "developer",
+    "engineering",
+    "analysis",
+    "design",
+    "simulation",
+    "cad",
+    "fea",
+    "cfd",
+    "software",
+    "mechanical",
+    "electrical",
+    "civil",
+    "aerospace",
 ]
 
 NON_RESUME_KEYWORDS = [
@@ -47,8 +64,7 @@ NON_RESUME_KEYWORDS = [
     "ticket",
     "payment",
     "tax",
-    "bank",
-    "statement",
+    "bank statement",
 ]
 
 def is_valid_resume(text: str) -> bool:
@@ -57,11 +73,12 @@ def is_valid_resume(text: str) -> bool:
     if len(text) < 200:
         return False
 
-    resume_score = sum(keyword in text for keyword in RESUME_KEYWORDS)
-    non_resume_score = sum(keyword in text for keyword in NON_RESUME_KEYWORDS)
+    resume_score = sum(k in text for k in RESUME_KEYWORDS)
+    engineering_score = sum(k in text for k in ENGINEERING_KEYWORDS)
+    non_resume_score = sum(k in text for k in NON_RESUME_KEYWORDS)
 
-    # More forgiving threshold
-    return resume_score >= 2 and non_resume_score == 0
+    # Must look like resume AND not like ticket/bill
+    return (resume_score >= 2 or engineering_score >= 2) and non_resume_score == 0
 
 # -------- PDF EXTRACTION HELPER --------
 
@@ -92,23 +109,6 @@ async def extract_resume_text(file: UploadFile) -> str:
         )
 
     return text
-
-# -------- KEYWORD EXTRACTION --------
-
-def extract_keywords(text: str) -> str:
-    keywords = [
-        "ios", "swift", "frontend", "react",
-        "backend", "python", "java",
-        "full stack", "software engineer"
-    ]
-
-    text_lower = text.lower()
-
-    for k in keywords:
-        if k in text_lower:
-            return k
-
-    return "software engineer"
 
 # -------- ROOT --------
 
@@ -142,10 +142,7 @@ async def jobs_from_resume(
 
     text = await extract_resume_text(file)
 
-    from app.services.domain_classifier import generate_job_query
-    
     query = generate_job_query(text)
-
 
     try:
         jobs = fetch_jobs(
@@ -156,7 +153,7 @@ async def jobs_from_resume(
 
         if not jobs and country == "in":
             jobs = fetch_jobs(
-                query="software engineer",
+                query="graduate engineer",
                 country=country,
                 resume_text=text
             )
