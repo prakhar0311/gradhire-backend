@@ -21,37 +21,17 @@ ALLOWED_COUNTRIES = {"in", "us"}
 
 # -------- RESUME DETECTION --------
 
-# General resume signals (any industry)
-RESUME_KEYWORDS = [
+RESUME_STRUCTURE_KEYWORDS = [
     "experience",
     "education",
     "skills",
     "projects",
     "summary",
     "professional",
-    "work experience",
     "university",
     "bachelor",
     "master",
-    "degree",
     "intern",
-]
-
-# Engineering signals (covers ALL engineering domains)
-ENGINEERING_KEYWORDS = [
-    "engineer",
-    "engineering",
-    "analysis",
-    "design",
-    "simulation",
-    "cad",
-    "fea",
-    "cfd",
-    "software",
-    "mechanical",
-    "electrical",
-    "civil",
-    "aerospace",
 ]
 
 NON_RESUME_KEYWORDS = [
@@ -67,18 +47,34 @@ NON_RESUME_KEYWORDS = [
     "bank statement",
 ]
 
-def is_valid_resume(text: str) -> bool:
-    text = text.lower().strip()
 
+def normalize_text(text: str) -> str:
+    """Clean messy PDF extraction"""
+    text = re.sub(r"\s+", " ", text)
+    return text.strip()
+
+
+def is_valid_resume(text: str) -> bool:
+
+    text = normalize_text(text).lower()
+
+    # Too short → not a resume
     if len(text) < 200:
         return False
 
-    resume_score = sum(k in text for k in RESUME_KEYWORDS)
-    engineering_score = sum(k in text for k in ENGINEERING_KEYWORDS)
-    non_resume_score = sum(k in text for k in NON_RESUME_KEYWORDS)
+    # Reject obvious non-resumes
+    if any(k in text for k in NON_RESUME_KEYWORDS):
+        return False
 
-    # Must look like resume AND not like ticket/bill
-    return (resume_score >= 2 or engineering_score >= 2) and non_resume_score == 0
+    # Resume structure signals
+    structure_hits = sum(k in text for k in RESUME_STRUCTURE_KEYWORDS)
+
+    # Word diversity check (real resumes have lots of unique words)
+    words = set(re.findall(r"\b\w+\b", text))
+    diversity_score = len(words)
+
+    return structure_hits >= 2 and diversity_score >= 50
+
 
 # -------- PDF EXTRACTION HELPER --------
 
@@ -99,6 +95,9 @@ async def extract_resume_text(file: UploadFile) -> str:
                 extracted = page.extract_text()
                 if extracted:
                     text += extracted + "\n"
+
+        text = normalize_text(text)
+
     except Exception:
         raise HTTPException(400, "Invalid PDF file")
 
@@ -110,11 +109,13 @@ async def extract_resume_text(file: UploadFile) -> str:
 
     return text
 
+
 # -------- ROOT --------
 
 @app.get("/")
 def root():
     return {"message": "GradHire backend running 🚀"}
+
 
 # -------- UPLOAD --------
 
@@ -128,6 +129,7 @@ async def upload_resume(file: UploadFile = File(...)):
         "status": "resume validated",
         "text": text
     }
+
 
 # -------- JOB SEARCH --------
 
@@ -153,7 +155,7 @@ async def jobs_from_resume(
 
         if not jobs and country == "in":
             jobs = fetch_jobs(
-                query="graduate engineer",
+                query="junior software engineer",
                 country=country,
                 resume_text=text
             )
@@ -163,6 +165,7 @@ async def jobs_from_resume(
     except Exception:
         return []
 
+
 # -------- SAFE AI JSON PARSER --------
 
 def parse_ai_json(text: str) -> dict:
@@ -171,6 +174,7 @@ def parse_ai_json(text: str) -> dict:
         raise ValueError("Invalid AI response")
 
     return json.loads(match.group())
+
 
 # -------- RESUME OPTIMIZATION --------
 

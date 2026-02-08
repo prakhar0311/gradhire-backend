@@ -1,5 +1,6 @@
 import os
 import json
+import re
 from openai import OpenAI
 
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
@@ -26,8 +27,23 @@ Rules:
 - Focus on realistic improvements
 """
 
-# Safety limits (prevents huge token usage)
+# Safety limits
 MAX_TEXT_LENGTH = 4000
+MAX_TOKENS = 500
+
+
+def extract_json(text: str) -> dict:
+    """
+    Extract JSON safely from model output.
+    Handles cases where model adds extra text.
+    """
+
+    match = re.search(r"\{.*\}", text, re.DOTALL)
+
+    if not match:
+        raise ValueError("No JSON found in AI response")
+
+    return json.loads(match.group())
 
 
 def optimize_resume_ai(resume_text: str, job_description: str) -> str:
@@ -52,27 +68,28 @@ Job description:
 {job_description[:MAX_TEXT_LENGTH]}
 """
                 }
-            ]
+            ],
+            temperature=0.2,
+            max_tokens=MAX_TOKENS,
+            timeout=25
         )
 
-        content = response.choices[0].message.content.strip()
+        raw_content = response.choices[0].message.content.strip()
 
-        # Try parsing JSON safely
         try:
-            parsed = json.loads(content)
-        except json.JSONDecodeError:
-            print("⚠️ Invalid JSON from OpenAI:", content)
+            parsed = extract_json(raw_content)
 
-            # Safe fallback
+        except Exception as e:
+            print("⚠️ JSON parse failed:", raw_content)
+
             parsed = {
                 "missing_skills": [],
                 "improved_bullets": [
-                    "AI response formatting issue. Please retry."
+                    "AI formatting issue. Please retry."
                 ],
                 "ats_keywords": []
             }
 
-        # Ensure required keys exist
         return json.dumps({
             "missing_skills": parsed.get("missing_skills", []),
             "improved_bullets": parsed.get("improved_bullets", []),
@@ -81,4 +98,12 @@ Job description:
 
     except Exception as e:
         print("❌ OpenAI error:", str(e))
-        raise Exception("AI optimization failed")
+
+        # Hard fallback — never crash API
+        return json.dumps({
+            "missing_skills": [],
+            "improved_bullets": [
+                "Optimization temporarily unavailable. Please try again."
+            ],
+            "ats_keywords": []
+        })

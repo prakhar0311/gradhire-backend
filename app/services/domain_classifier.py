@@ -1,71 +1,89 @@
 import re
 
-# -------- DOMAIN KEYWORDS --------
+# =====================================================
+# SOFTWARE SPECIALIZATION CLASSIFIER (GradHire v1)
+# =====================================================
 
-DOMAIN_KEYWORDS = {
-    "software": [
-        r"\bsoftware\b",
+SPECIALIZATION_KEYWORDS = {
+
+    "frontend": [
         r"\breact\b",
+        r"\bnext\.?js\b",
+        r"\bvue\b",
+        r"\bangular\b",
+        r"\bfrontend\b",
+        r"\bhtml\b",
+        r"\bcss\b",
+        r"\btailwind\b",
+        r"\bbootstrap\b",
+        r"\bui\b",
+    ],
+
+    "backend": [
+        r"\bbackend\b",
+        r"\bnode\b",
+        r"\bexpress\b",
         r"\bpython\b",
         r"\bjava\b",
+        r"\bspring\b",
+        r"\bdjango\b",
+        r"\bapi\b",
+        r"\bmicroservices\b",
+        r"\bserver\b",
+    ],
+
+    "ios": [
+        r"\bios\b",
         r"\bswift\b",
-        r"\bfrontend\b",
-        r"\bbackend\b",
+        r"\bswiftui\b",
+        r"\bxcode\b",
+        r"\bobjective[- ]?c\b",
+    ],
+
+    "android": [
+        r"\bandroid\b",
+        r"\bkotlin\b",
+        r"\bjava android\b",
+        r"\bjetpack\b",
+    ],
+
+    "data": [
+        r"\bdata\b",
+        r"\bmachine learning\b",
+        r"\bml\b",
+        r"\bai\b",
+        r"\bpandas\b",
+        r"\bnumpy\b",
+        r"\btensorflow\b",
+        r"\bscikit\b",
+    ],
+
+    "fullstack": [
         r"\bfull[- ]?stack\b",
-        r"\bweb developer\b",
-    ],
-
-    "aerospace": [
-        r"\baerospace\b",
-        r"\baircraft\b",
-        r"\baerodynamics\b",
-        r"\bcfd\b",
-        r"\bscramjet\b",
-        r"\bflight\b",
-        r"\bansys\b",
-    ],
-
-    "mechanical": [
-        r"\bmechanical\b",
-        r"\bsolid mechanics\b",
-        r"\bthermodynamics\b",
-        r"\bmachine design\b",
-        r"\bfea\b",
-        r"\bhypermesh\b",
-    ],
-
-    "electrical": [
-        r"\belectrical\b",
-        r"\bcircuit\b",
-        r"\bpower systems\b",
-        r"\bembedded\b",
-        r"\belectronics\b",
-    ],
-
-    "civil": [
-        r"\bcivil\b",
-        r"\bconstruction\b",
-        r"\bstructural\b",
-        r"\binfrastructure\b",
-        r"\bsurveying\b",
+        r"\bmern\b",
+        r"\bmean\b",
     ],
 }
 
-# -------- QUERY MAP --------
+# =====================================================
+# JOB QUERY MAP
+# =====================================================
 
-DOMAIN_QUERY_MAP = {
-    "software": "junior software engineer",
-    "aerospace": "entry level aerospace engineer",
-    "mechanical": "graduate mechanical engineer",
-    "electrical": "junior electrical engineer",
-    "civil": "graduate civil engineer",
-    "general": "graduate engineer",
+QUERY_MAP = {
+    "frontend": "junior frontend developer",
+    "backend": "junior backend developer",
+    "ios": "junior ios developer",
+    "android": "junior android developer",
+    "data": "junior data analyst",
+    "fullstack": "junior full stack developer",
+    "general": "junior software engineer",
 }
 
+# =====================================================
+# SPECIALIZATION DETECTION
+# =====================================================
 
-# -------- DOMAIN DETECTION --------
-
-def detect_engineering_domain(text: str) -> str:
+def detect_specialization(text: str) -> str:
 
     if not text:
         return "general"
@@ -74,7 +92,7 @@ def detect_engineering_domain(text: str) -> str:
 
     scores = {}
 
-    for domain, patterns in DOMAIN_KEYWORDS.items():
+    for spec, patterns in SPECIALIZATION_KEYWORDS.items():
 
         score = 0
 
@@ -82,22 +100,22 @@ def detect_engineering_domain(text: str) -> str:
             matches = re.findall(pattern, text)
             score += len(matches)
 
-        scores[domain] = score
+        scores[spec] = score
 
-    # Pick highest score
-    best_domain = max(scores, key=scores.get)
+    best_spec = max(scores, key=scores.get)
 
-    # If no strong signal → general engineering
-    if scores[best_domain] == 0:
+    # No strong signal → general software
+    if scores[best_spec] == 0:
         return "general"
 
-    return best_domain
+    return best_spec
 
-
-# -------- QUERY GENERATION --------
+# =====================================================
+# PUBLIC API
+# =====================================================
 
 def generate_job_query(resume_text: str) -> str:
 
-    domain = detect_engineering_domain(resume_text)
+    spec = detect_specialization(resume_text)
 
-    return DOMAIN_QUERY_MAP.get(domain, "graduate engineer")
+    return QUERY_MAP.get(spec, "junior software engineer")
