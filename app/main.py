@@ -126,7 +126,10 @@ async def jobs_from_resume(
 
     text = await extract_resume_text(file)
 
-    query = extract_keywords(text)
+    from app.services.domain_classifier import generate_job_query
+    
+    query = generate_job_query(text)
+
 
     try:
         jobs = fetch_jobs(
