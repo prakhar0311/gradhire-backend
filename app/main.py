@@ -19,64 +19,69 @@ app = FastAPI()
 MAX_FILE_SIZE = 5 * 1024 * 1024  # 5MB
 ALLOWED_COUNTRIES = {"in", "us"}
 
-# -------- RESUME DETECTION --------
+# =====================================================
+# TEXT NORMALIZATION
+# =====================================================
 
-RESUME_STRUCTURE_KEYWORDS = [
+def normalize_text(text: str) -> str:
+    """
+    Fix common PDF extraction issues:
+    - merged words
+    - missing spaces
+    - weird formatting
+    """
+
+    # Add space between lowercase → uppercase transitions
+    text = re.sub(r'([a-z])([A-Z])', r'\1 \2', text)
+
+    # Replace multiple whitespace with single space
+    text = re.sub(r'\s+', ' ', text)
+
+    return text.lower().strip()
+
+# =====================================================
+# RESUME DETECTION
+# =====================================================
+
+RESUME_SIGNALS = [
     "experience",
     "education",
     "skills",
     "projects",
     "summary",
-    "professional",
+    "work",
     "university",
     "bachelor",
     "master",
-    "intern",
+    "engineer",
+    "developer",
 ]
 
-NON_RESUME_KEYWORDS = [
+NON_RESUME_SIGNALS = [
     "boarding pass",
     "flight",
-    "gate",
-    "seat",
     "invoice",
     "receipt",
     "ticket",
     "payment",
-    "tax",
     "bank statement",
 ]
 
-
-def normalize_text(text: str) -> str:
-    """Clean messy PDF extraction"""
-    text = re.sub(r"\s+", " ", text)
-    return text.strip()
-
-
 def is_valid_resume(text: str) -> bool:
 
-    text = normalize_text(text).lower()
+    text = normalize_text(text)
 
-    # Too short → not a resume
-    if len(text) < 200:
+    if len(text) < 150:
         return False
 
-    # Reject obvious non-resumes
-    if any(k in text for k in NON_RESUME_KEYWORDS):
-        return False
+    resume_score = sum(signal in text for signal in RESUME_SIGNALS)
+    non_resume_score = sum(signal in text for signal in NON_RESUME_SIGNALS)
 
-    # Resume structure signals
-    structure_hits = sum(k in text for k in RESUME_STRUCTURE_KEYWORDS)
+    return resume_score >= 2 and non_resume_score == 0
 
-    # Word diversity check (real resumes have lots of unique words)
-    words = set(re.findall(r"\b\w+\b", text))
-    diversity_score = len(words)
-
-    return structure_hits >= 2 and diversity_score >= 50
-
-
-# -------- PDF EXTRACTION HELPER --------
+# =====================================================
+# PDF EXTRACTION
+# =====================================================
 
 async def extract_resume_text(file: UploadFile) -> str:
 
@@ -95,9 +100,6 @@ async def extract_resume_text(file: UploadFile) -> str:
                 extracted = page.extract_text()
                 if extracted:
                     text += extracted + "\n"
-
-        text = normalize_text(text)
-
     except Exception:
         raise HTTPException(400, "Invalid PDF file")
 
@@ -109,15 +111,17 @@ async def extract_resume_text(file: UploadFile) -> str:
 
     return text
 
-
-# -------- ROOT --------
+# =====================================================
+# ROOT
+# =====================================================
 
 @app.get("/")
 def root():
     return {"message": "GradHire backend running 🚀"}
 
-
-# -------- UPLOAD --------
+# =====================================================
+# UPLOAD
+# =====================================================
 
 @app.post("/resume/upload")
 async def upload_resume(file: UploadFile = File(...)):
@@ -130,8 +134,9 @@ async def upload_resume(file: UploadFile = File(...)):
         "text": text
     }
 
-
-# -------- JOB SEARCH --------
+# =====================================================
+# JOB SEARCH
+# =====================================================
 
 @app.post("/jobs/from-resume")
 async def jobs_from_resume(
@@ -165,8 +170,9 @@ async def jobs_from_resume(
     except Exception:
         return []
 
-
-# -------- SAFE AI JSON PARSER --------
+# =====================================================
+# SAFE AI JSON PARSER
+# =====================================================
 
 def parse_ai_json(text: str) -> dict:
     match = re.search(r"\{.*\}", text, re.DOTALL)
@@ -175,8 +181,9 @@ def parse_ai_json(text: str) -> dict:
 
     return json.loads(match.group())
 
-
-# -------- RESUME OPTIMIZATION --------
+# =====================================================
+# RESUME OPTIMIZATION
+# =====================================================
 
 @app.post("/resume/optimize")
 async def optimize_resume(payload: dict):
