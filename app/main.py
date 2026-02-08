@@ -21,31 +21,47 @@ ALLOWED_COUNTRIES = {"in", "us"}
 # -------- RESUME DETECTION --------
 
 RESUME_KEYWORDS = [
-    "experience", "education", "skills", "projects",
-    "work experience", "professional experience",
-    "software", "engineer", "developer",
-    "university", "bachelor", "master",
-    "python", "java", "react", "swift"
+    "experience",
+    "education",
+    "skills",
+    "projects",
+    "summary",
+    "professional",
+    "work",
+    "university",
+    "bachelor",
+    "master",
+    "degree",
+    "intern",
+    "engineer",
+    "developer",
 ]
 
 NON_RESUME_KEYWORDS = [
-    "boarding pass", "flight", "gate", "seat",
-    "invoice", "receipt", "ticket", "payment",
-    "tax", "bank", "statement"
+    "boarding pass",
+    "flight",
+    "gate",
+    "seat",
+    "invoice",
+    "receipt",
+    "ticket",
+    "payment",
+    "tax",
+    "bank",
+    "statement",
 ]
 
 def is_valid_resume(text: str) -> bool:
-    text = text.strip()
+    text = text.lower().strip()
 
     if len(text) < 200:
         return False
 
-    text_lower = text.lower()
+    resume_score = sum(keyword in text for keyword in RESUME_KEYWORDS)
+    non_resume_score = sum(keyword in text for keyword in NON_RESUME_KEYWORDS)
 
-    resume_score = sum(k in text_lower for k in RESUME_KEYWORDS)
-    non_resume_score = sum(k in text_lower for k in NON_RESUME_KEYWORDS)
-
-    return resume_score >= 3 and non_resume_score == 0
+    # More forgiving threshold
+    return resume_score >= 2 and non_resume_score == 0
 
 # -------- PDF EXTRACTION HELPER --------
 

@@ -1,28 +1,53 @@
 import re
-from app.services.ai_optimizer import optimize_resume_ai  # optional fallback
 
 # -------- DOMAIN KEYWORDS --------
 
 DOMAIN_KEYWORDS = {
     "software": [
-        "software", "react", "python", "java", "swift",
-        "frontend", "backend", "full stack", "web developer"
+        r"\bsoftware\b",
+        r"\breact\b",
+        r"\bpython\b",
+        r"\bjava\b",
+        r"\bswift\b",
+        r"\bfrontend\b",
+        r"\bbackend\b",
+        r"\bfull[- ]?stack\b",
+        r"\bweb developer\b",
     ],
+
     "aerospace": [
-        "aerospace", "aircraft", "aerodynamics", "cfd",
-        "scramjet", "flight", "ansys fluent"
+        r"\baerospace\b",
+        r"\baircraft\b",
+        r"\baerodynamics\b",
+        r"\bcfd\b",
+        r"\bscramjet\b",
+        r"\bflight\b",
+        r"\bansys\b",
     ],
+
     "mechanical": [
-        "mechanical", "solid mechanics", "thermodynamics",
-        "machine design", "fea", "hypermesh"
+        r"\bmechanical\b",
+        r"\bsolid mechanics\b",
+        r"\bthermodynamics\b",
+        r"\bmachine design\b",
+        r"\bfea\b",
+        r"\bhypermesh\b",
     ],
+
     "electrical": [
-        "electrical", "circuit", "power systems",
-        "embedded", "electronics"
+        r"\belectrical\b",
+        r"\bcircuit\b",
+        r"\bpower systems\b",
+        r"\bembedded\b",
+        r"\belectronics\b",
     ],
+
     "civil": [
-        "civil", "construction", "structural",
-        "infrastructure", "surveying"
+        r"\bcivil\b",
+        r"\bconstruction\b",
+        r"\bstructural\b",
+        r"\binfrastructure\b",
+        r"\bsurveying\b",
     ],
 }
 
@@ -30,7 +55,7 @@ DOMAIN_KEYWORDS = {
 
 DOMAIN_QUERY_MAP = {
     "software": "junior software engineer",
-    "aerospace": "aerospace engineer entry level",
+    "aerospace": "entry level aerospace engineer",
     "mechanical": "graduate mechanical engineer",
     "electrical": "junior electrical engineer",
     "civil": "graduate civil engineer",
@@ -49,10 +74,17 @@ def detect_engineering_domain(text: str) -> str:
 
     scores = {}
 
-    for domain, keywords in DOMAIN_KEYWORDS.items():
-        score = sum(1 for k in keywords if k in text)
+    for domain, patterns in DOMAIN_KEYWORDS.items():
+
+        score = 0
+
+        for pattern in patterns:
+            matches = re.findall(pattern, text)
+            score += len(matches)
+
         scores[domain] = score
 
+    # Pick highest score
     best_domain = max(scores, key=scores.get)
 
     # If no strong signal → general engineering
