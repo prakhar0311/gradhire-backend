@@ -1,14 +1,16 @@
 from fastapi import FastAPI, UploadFile, File, Query, HTTPException
+from fastapi.responses import FileResponse
 from dotenv import load_dotenv
 import pdfplumber
 import io
 import os
-import json
 import re
+import json
 
 from app.services.ai_optimizer import optimize_resume_ai
 from app.services.jobs import fetch_jobs
 from app.services.domain_classifier import generate_job_query
+from app.services.resume_builder import build_resume_pdf
 
 # -------- LOAD ENV --------
 load_dotenv(dotenv_path=os.path.join(os.getcwd(), ".env"))
@@ -25,16 +27,10 @@ ALLOWED_COUNTRIES = {"in", "us"}
 
 def normalize_text(text: str) -> str:
     """
-    Fix common PDF extraction issues:
-    - merged words
-    - missing spaces
-    - weird formatting
+    Fix PDF extraction formatting issues.
     """
 
-    # Add space between lowercase → uppercase transitions
     text = re.sub(r'([a-z])([A-Z])', r'\1 \2', text)
-
-    # Replace multiple whitespace with single space
     text = re.sub(r'\s+', ' ', text)
 
     return text.lower().strip()
@@ -171,18 +167,7 @@ async def jobs_from_resume(
         return []
 
 # =====================================================
-# SAFE AI JSON PARSER
-# =====================================================
-
-def parse_ai_json(text: str) -> dict:
-    match = re.search(r"\{.*\}", text, re.DOTALL)
-    if not match:
-        raise ValueError("Invalid AI response")
-
-    return json.loads(match.group())
-
-# =====================================================
-# RESUME OPTIMIZATION
+# RESUME OPTIMIZATION (JSON PREVIEW)
 # =====================================================
 
 @app.post("/resume/optimize")
@@ -195,14 +180,8 @@ async def optimize_resume(payload: dict):
         raise HTTPException(400, "Missing resume or job description")
 
     try:
-        ai_response = optimize_resume_ai(resume, job)
-        parsed = parse_ai_json(ai_response)
-
-        return {
-            "missing_skills": parsed.get("missing_skills", []),
-            "improved_bullets": parsed.get("improved_bullets", []),
-            "ats_keywords": parsed.get("ats_keywords", [])
-        }
+        result = optimize_resume_ai(resume, job)
+        return json.loads(result)
 
     except Exception as e:
         print("❌ AI optimization failed:", str(e))
@@ -214,3 +193,43 @@ async def optimize_resume(payload: dict):
             ],
             "ats_keywords": []
         }
+
+# =====================================================
+# DOWNLOAD OPTIMIZED RESUME PDF
+# =====================================================
+
+@app.post("/resume/download")
+async def download_resume(
+    file: UploadFile = File(...),
+    job_description: str = ""
+):
+
+    resume_text = await extract_resume_text(file)
+
+    if not job_description.strip():
+        raise HTTPException(400, "Missing job description")
+
+    try:
+        ai_json = optimize_resume_ai(resume_text, job_description)
+        optimized = json.loads(ai_json)
+
+        resume_data = {
+            "name": "Candidate Name",
+            "contact": "email | phone | linkedin",
+            "summary": "",
+            "skills": optimized.get("ats_keywords", []),
+            "experience_improvements": optimized.get("improved_bullets", []),
+            "project_improvements": []
+        }
+
+        pdf_path = build_resume_pdf(resume_data)
+
+        return FileResponse(
+            pdf_path,
+            media_type="application/pdf",
+            filename="optimized_resume.pdf"
+        )
+
+    except Exception as e:
+        print("❌ Resume download failed:", str(e))
+        raise HTTPException(500, "Failed to generate resume")

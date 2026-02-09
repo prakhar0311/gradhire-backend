@@ -6,30 +6,34 @@ from openai import OpenAI
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 SYSTEM_PROMPT = """
-You are an expert resume optimizer and career coach.
+You are a professional resume editor and career coach.
 
-Analyze the resume and job description.
+Improve the user's resume for the target job.
+
+Preserve truth. Do NOT invent fake experience.
 
 Return ONLY valid JSON in this exact format:
 
 {
-  "missing_skills": [string],
-  "improved_bullets": [string],
-  "ats_keywords": [string]
+  "summary": string,
+  "skills": [string],
+  "experience_improvements": [string],
+  "project_improvements": [string]
 }
 
 Rules:
 - Output raw JSON only
 - No explanations
 - No markdown
-- No extra text
-- Keep bullets concise and professional
-- Focus on realistic improvements
+- Improve clarity and impact
+- Add relevant missing skills
+- Rewrite bullets to sound professional
+- Keep concise and ATS-friendly
 """
 
 # Safety limits
 MAX_TEXT_LENGTH = 4000
-MAX_TOKENS = 500
+MAX_TOKENS = 600
 
 
 def extract_json(text: str) -> dict:
@@ -46,11 +50,11 @@ def extract_json(text: str) -> dict:
     return json.loads(match.group())
 
 
-def optimize_resume_ai(resume_text: str, job_description: str) -> str:
+def optimize_resume_ai(resume_text: str, job_description: str) -> dict:
     """
     Calls OpenAI to optimize resume.
-    Always returns valid JSON string.
-    Raises Exception on failure.
+    Always returns structured dict.
+    Never crashes the API.
     """
 
     try:
@@ -79,31 +83,39 @@ Job description:
         try:
             parsed = extract_json(raw_content)
 
-        except Exception as e:
+        except Exception:
             print("⚠️ JSON parse failed:", raw_content)
 
             parsed = {
-                "missing_skills": [],
-                "improved_bullets": [
+                "summary": "",
+                "skills": [],
+                "experience_improvements": [
                     "AI formatting issue. Please retry."
                 ],
-                "ats_keywords": []
+                "project_improvements": []
             }
 
-        return json.dumps({
-            "missing_skills": parsed.get("missing_skills", []),
-            "improved_bullets": parsed.get("improved_bullets", []),
-            "ats_keywords": parsed.get("ats_keywords", [])
-        })
+        # Ensure required keys exist
+        return {
+            "summary": parsed.get("summary", ""),
+            "skills": parsed.get("skills", []),
+            "experience_improvements": parsed.get(
+                "experience_improvements", []
+            ),
+            "project_improvements": parsed.get(
+                "project_improvements", []
+            )
+        }
 
     except Exception as e:
         print("❌ OpenAI error:", str(e))
 
         # Hard fallback — never crash API
-        return json.dumps({
-            "missing_skills": [],
-            "improved_bullets": [
+        return {
+            "summary": "",
+            "skills": [],
+            "experience_improvements": [
                 "Optimization temporarily unavailable. Please try again."
             ],
-            "ats_keywords": []
-        })
+            "project_improvements": []
+        }
