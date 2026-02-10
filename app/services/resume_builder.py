@@ -79,6 +79,9 @@ def build_resume_pdf(data: dict) -> str:
     )
 
     elements = []
+# at least gives a output in pdf does not give empty pdf
+    if not data.get("summary") and not data.get("skills") and not data.get("experience_improvements"):elements.append(Paragraph("No optimized content available.", body_style))
+
 
     # =========================
     # HEADER

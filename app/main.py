@@ -219,12 +219,12 @@ async def download_resume(
         optimized = optimize_resume_ai(resume_text, job_description)
 
         resume_data = {
-            "name": "Candidate Name",
-            "contact": "email | phone | linkedin",
-            "summary": "",
+            "name": "Optimised Resume",
+            "contact": "",
+            "summary":optimized.get("summary", ""),
             "skills": optimized.get("skills", []),
             "experience_improvements": optimized.get("experience_improvements", []),
-            "project_improvements": []
+            "project_improvements": optimized.get("project_improvements", [])
         }
 
         pdf_path = build_resume_pdf(resume_data)
