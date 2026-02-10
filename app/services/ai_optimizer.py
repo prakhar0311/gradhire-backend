@@ -51,51 +51,32 @@ def extract_json(text: str) -> dict:
 
 
 def optimize_resume_ai(resume_text: str, job_description: str) -> dict:
-    """
-    Calls OpenAI to optimize resume.
-    Always returns structured dict.
-    Never crashes the API.
-    """
-
     try:
         response = client.chat.completions.create(
-            model="gpt-5-mini",
+            model="gpt-4o-mini",  # ← stable model
             messages=[
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {
                     "role": "user",
                     "content": f"""
-         Resume:
-          {resume_text[:MAX_TEXT_LENGTH]}
+Resume:
+{resume_text[:MAX_TEXT_LENGTH]}
 
-        Job description:
-          {job_description[:MAX_TEXT_LENGTH]}
-        """
+Job description:
+{job_description[:MAX_TEXT_LENGTH]}
+"""
                 }
             ],
-            #temperature=0.2,
-            max_completion_tokens=MAX_TOKENS,
-            timeout=45
+            max_tokens=MAX_TOKENS
         )
 
-        raw_content = response.choices[0].message.content.strip()
+        raw_content = response.choices[0].message.content
 
-        try:
-            parsed = extract_json(raw_content)
+        if not raw_content:
+            raise ValueError("Empty AI response")
 
-        except Exception:
-            print("⚠️ JSON parse failed:", raw_content)
+        parsed = extract_json(raw_content.strip())
 
-            parsed = {
-                "summary": "",
-                "skills": [],
-                "experience_improvements": [
-                    "AI formatting issue. Please retry."
-                ],
-                "project_improvements": []
-            }
-
-        # Ensure required keys exist
         return {
             "summary": parsed.get("summary", ""),
             "skills": parsed.get("skills", []),
@@ -110,7 +91,6 @@ def optimize_resume_ai(resume_text: str, job_description: str) -> dict:
     except Exception as e:
         print("❌ OpenAI error:", str(e))
 
-        # Hard fallback — never crash API
         return {
             "summary": "",
             "skills": [],
