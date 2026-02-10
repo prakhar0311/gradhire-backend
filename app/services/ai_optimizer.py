@@ -16,7 +16,8 @@ Return ONLY valid JSON in this exact format:
 
 {
   "summary": string,
-  "skills": [string],
+  "missing_skills": [string],
+  "ats_keywords": [string],
   "experience_improvements": [string],
   "project_improvements": [string]
 }
@@ -25,23 +26,18 @@ Rules:
 - Output raw JSON only
 - No explanations
 - No markdown
-- Improve clarity and impact
-- Add relevant missing skills
-- Rewrite bullets to sound professional
-- Keep concise and ATS-friendly
+- Summary: 2–3 concise sentences
+- Missing skills: 5–8 key skill gaps
+- ATS keywords: 6–10 optimized keywords
+- Return EXACTLY 4 improved experience bullets
+- Keep content concise and ATS-friendly
 """
 
-# Safety limits
 MAX_TEXT_LENGTH = 4000
 MAX_TOKENS = 600
 
 
 def extract_json(text: str) -> dict:
-    """
-    Extract JSON safely from model output.
-    Handles cases where model adds extra text.
-    """
-
     match = re.search(r"\{.*\}", text, re.DOTALL)
 
     if not match:
@@ -53,7 +49,7 @@ def extract_json(text: str) -> dict:
 def optimize_resume_ai(resume_text: str, job_description: str) -> dict:
     try:
         response = client.chat.completions.create(
-            model="gpt-4o-mini",  # ← stable model
+            model="gpt-4o-mini",
             messages=[
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {
@@ -77,12 +73,14 @@ Job description:
 
         parsed = extract_json(raw_content.strip())
 
+        # 🔒 Enforce UI stability limits
         return {
             "summary": parsed.get("summary", ""),
-            "skills": parsed.get("skills", []),
+            "missing_skills": parsed.get("missing_skills", [])[:8],
+            "ats_keywords": parsed.get("ats_keywords", [])[:10],
             "experience_improvements": parsed.get(
                 "experience_improvements", []
-            ),
+            )[:5],
             "project_improvements": parsed.get(
                 "project_improvements", []
             )
@@ -93,7 +91,8 @@ Job description:
 
         return {
             "summary": "",
-            "skills": [],
+            "missing_skills": [],
+            "ats_keywords": [],
             "experience_improvements": [
                 "Optimization temporarily unavailable. Please try again."
             ],

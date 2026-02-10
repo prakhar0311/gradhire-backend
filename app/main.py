@@ -183,10 +183,11 @@ async def optimize_resume(payload: dict):
         result = optimize_resume_ai(resume, job)
 
         return {
-            "missing_skills": result.get("skills", []),
-            "improved_bullets": result.get("experience_improvements", []),
-            "ats_keywords": result.get("skills", [])
-        }
+        "missing_skills": result.get("missing_skills", []),
+        "improved_bullets": result.get("experience_improvements", []),
+        "ats_keywords": result.get("ats_keywords", [])
+        }  
+
 
     except Exception as e:
         print("❌ AI optimization failed:", str(e))
