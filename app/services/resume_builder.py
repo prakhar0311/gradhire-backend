@@ -9,30 +9,14 @@ from reportlab.platypus import (
     ListItem
 )
 from reportlab.lib.pagesizes import LETTER
-from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib.styles import ParagraphStyle
 from reportlab.lib.enums import TA_CENTER
 
 
 def build_resume_pdf(data: dict) -> str:
-    """
-    Builds optimized resume PDF.
-    Returns path to generated PDF file.
-
-    Expected data format:
-
-    {
-        "name": str,
-        "contact": str,
-        "summary": str,
-        "skills": [str],
-        "experience_improvements": [str],
-        "project_improvements": [str]
-    }
-    """
 
     temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
-
-    styles = getSampleStyleSheet()
+    temp_file.close()
 
     # =========================
     # STYLES
@@ -79,9 +63,6 @@ def build_resume_pdf(data: dict) -> str:
     )
 
     elements = []
-# at least gives a output in pdf does not give empty pdf
-    if not data.get("summary") and not data.get("skills") and not data.get("experience_improvements"):elements.append(Paragraph("No optimized content available.", body_style))
-
 
     # =========================
     # HEADER
@@ -91,9 +72,26 @@ def build_resume_pdf(data: dict) -> str:
         Paragraph(data.get("name", "Candidate Name"), header_style)
     )
 
-    elements.append(
-        Paragraph(data.get("contact", ""), contact_style)
+    contact = data.get("contact", "")
+    if contact:
+        elements.append(Paragraph(contact, contact_style))
+
+    # =========================
+    # EMPTY FALLBACK
+    # =========================
+
+    has_content = (
+        data.get("summary") or
+        data.get("skills") or
+        data.get("experience_improvements")
     )
+
+    if not has_content:
+        elements.append(
+            Paragraph("No optimized content available.", body_style)
+        )
+        doc.build(elements)
+        return temp_file.name
 
     # =========================
     # SUMMARY
@@ -133,10 +131,7 @@ def build_resume_pdf(data: dict) -> str:
             for b in experience
         ]
 
-        elements.append(
-            ListFlowable(bullets, bulletType="bullet")
-        )
-
+        elements.append(ListFlowable(bullets, bulletType="bullet"))
         elements.append(Spacer(1, 8))
 
     # =========================
@@ -153,9 +148,7 @@ def build_resume_pdf(data: dict) -> str:
             for b in projects
         ]
 
-        elements.append(
-            ListFlowable(bullets, bulletType="bullet")
-        )
+        elements.append(ListFlowable(bullets, bulletType="bullet"))
 
     # =========================
     # BUILD PDF
