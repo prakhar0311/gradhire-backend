@@ -181,7 +181,12 @@ async def optimize_resume(payload: dict):
 
     try:
         result = optimize_resume_ai(resume, job)
-        return json.loads(result)
+
+        return {
+            "missing_skills": result.get("skills", []),
+            "improved_bullets": result.get("experience_improvements", []),
+            "ats_keywords": result.get("skills", [])
+        }
 
     except Exception as e:
         print("❌ AI optimization failed:", str(e))
@@ -193,6 +198,7 @@ async def optimize_resume(payload: dict):
             ],
             "ats_keywords": []
         }
+
 
 # =====================================================
 # DOWNLOAD OPTIMIZED RESUME PDF
@@ -210,15 +216,14 @@ async def download_resume(
         raise HTTPException(400, "Missing job description")
 
     try:
-        ai_json = optimize_resume_ai(resume_text, job_description)
-        optimized = json.loads(ai_json)
+        optimized = optimize_resume_ai(resume_text, job_description)
 
         resume_data = {
             "name": "Candidate Name",
             "contact": "email | phone | linkedin",
             "summary": "",
-            "skills": optimized.get("ats_keywords", []),
-            "experience_improvements": optimized.get("improved_bullets", []),
+            "skills": optimized.get("skills", []),
+            "experience_improvements": optimized.get("experience_improvements", []),
             "project_improvements": []
         }
 

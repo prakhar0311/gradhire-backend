@@ -74,7 +74,7 @@ Job description:
                 }
             ],
             temperature=0.2,
-            max_tokens=MAX_TOKENS,
+            max_completion_tokens=MAX_TOKENS,
             timeout=25
         )
 
