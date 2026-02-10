@@ -65,17 +65,17 @@ def optimize_resume_ai(resume_text: str, job_description: str) -> dict:
                 {
                     "role": "user",
                     "content": f"""
-Resume:
-{resume_text[:MAX_TEXT_LENGTH]}
+         Resume:
+          {resume_text[:MAX_TEXT_LENGTH]}
 
-Job description:
-{job_description[:MAX_TEXT_LENGTH]}
-"""
+        Job description:
+          {job_description[:MAX_TEXT_LENGTH]}
+        """
                 }
             ],
-            temperature=0.2,
+            #temperature=0.2,
             max_completion_tokens=MAX_TOKENS,
-            timeout=25
+            timeout=45
         )
 
         raw_content = response.choices[0].message.content.strip()
