@@ -204,11 +204,13 @@ async def optimize_resume(payload: dict):
 # =====================================================
 # DOWNLOAD OPTIMIZED RESUME PDF
 # =====================================================
+from fastapi import Form
 
 @app.post("/resume/download")
 async def download_resume(
     file: UploadFile = File(...),
-    job_description: str = ""
+    job_description: str = Form(...)
+   # job_description: str = ""
 ):
 
     resume_text = await extract_resume_text(file)
