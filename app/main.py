@@ -1,11 +1,15 @@
-from fastapi import FastAPI, UploadFile, File, Query, HTTPException
+
+from fastapi import FastAPI, UploadFile, File, Query, HTTPException, Form, BackgroundTasks
 from fastapi.responses import FileResponse
+from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
+
 import pdfplumber
 import io
 import os
 import re
-import json
+import asyncio
+import logging
 
 from app.services.ai_optimizer import optimize_resume_ai
 from app.services.jobs import fetch_jobs
@@ -15,7 +19,18 @@ from app.services.resume_builder import build_resume_pdf
 # -------- LOAD ENV --------
 load_dotenv(dotenv_path=os.path.join(os.getcwd(), ".env"))
 
+# -------- LOGGING --------
+logging.basicConfig(level=logging.INFO)
+
 app = FastAPI()
+
+# -------- CORS (safe default for mobile apps) --------
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # restrict later if needed
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # -------- CONFIG --------
 MAX_FILE_SIZE = 5 * 1024 * 1024  # 5MB
@@ -26,13 +41,8 @@ ALLOWED_COUNTRIES = {"in", "us"}
 # =====================================================
 
 def normalize_text(text: str) -> str:
-    """
-    Fix PDF extraction formatting issues.
-    """
-
     text = re.sub(r'([a-z])([A-Z])', r'\1 \2', text)
     text = re.sub(r'\s+', ' ', text)
-
     return text.lower().strip()
 
 # =====================================================
@@ -40,31 +50,17 @@ def normalize_text(text: str) -> str:
 # =====================================================
 
 RESUME_SIGNALS = [
-    "experience",
-    "education",
-    "skills",
-    "projects",
-    "summary",
-    "work",
-    "university",
-    "bachelor",
-    "master",
-    "engineer",
-    "developer",
+    "experience", "education", "skills", "projects",
+    "summary", "work", "university", "bachelor",
+    "master", "engineer", "developer",
 ]
 
 NON_RESUME_SIGNALS = [
-    "boarding pass",
-    "flight",
-    "invoice",
-    "receipt",
-    "ticket",
-    "payment",
-    "bank statement",
+    "boarding pass", "flight", "invoice",
+    "receipt", "ticket", "payment", "bank statement",
 ]
 
 def is_valid_resume(text: str) -> bool:
-
     text = normalize_text(text)
 
     if len(text) < 150:
@@ -96,6 +92,7 @@ async def extract_resume_text(file: UploadFile) -> str:
                 extracted = page.extract_text()
                 if extracted:
                     text += extracted + "\n"
+
     except Exception:
         raise HTTPException(400, "Invalid PDF file")
 
@@ -124,10 +121,13 @@ async def upload_resume(file: UploadFile = File(...)):
 
     text = await extract_resume_text(file)
 
+    logging.info(f"Resume uploaded: {file.filename}")
+
+    # Return preview only (avoid huge payloads)
     return {
         "filename": file.filename,
         "status": "resume validated",
-        "text": text
+        "preview": text[:2000]
     }
 
 # =====================================================
@@ -144,27 +144,36 @@ async def jobs_from_resume(
         raise HTTPException(400, "Unsupported country")
 
     text = await extract_resume_text(file)
-
     query = generate_job_query(text)
 
+    logging.info(f"Job search query: {query} | country: {country}")
+
     try:
-        jobs = fetch_jobs(
-            query=query,
-            country=country,
-            resume_text=text
+        jobs = await asyncio.wait_for(
+            asyncio.to_thread(fetch_jobs, query, country, text),
+            timeout=20
         )
 
         if not jobs and country == "in":
-            jobs = fetch_jobs(
-                query="junior software engineer",
-                country=country,
-                resume_text=text
+            jobs = await asyncio.wait_for(
+                asyncio.to_thread(
+                    fetch_jobs,
+                    "junior software engineer",
+                    country,
+                    text
+                ),
+                timeout=20
             )
 
         return jobs
 
-    except Exception:
-        return []
+    except asyncio.TimeoutError:
+        logging.error("Job fetch timeout")
+        raise HTTPException(504, "Job search timeout")
+
+    except Exception as e:
+        logging.error(f"Job fetch failed: {str(e)}")
+        raise HTTPException(500, "Failed to fetch jobs")
 
 # =====================================================
 # RESUME OPTIMIZATION (JSON PREVIEW)
@@ -180,17 +189,25 @@ async def optimize_resume(payload: dict):
         raise HTTPException(400, "Missing resume or job description")
 
     try:
-        result = optimize_resume_ai(resume, job)
+        result = await asyncio.wait_for(
+            asyncio.to_thread(optimize_resume_ai, resume, job),
+            timeout=25
+        )
 
         return {
-        "missing_skills": result.get("missing_skills", []),
-        "improved_bullets": result.get("experience_improvements", []),
-        "ats_keywords": result.get("ats_keywords", [])
-        }  
+            "missing_skills": result.get("missing_skills", []),
+            "improved_bullets": result.get(
+                "experience_improvements", []
+            ),
+            "ats_keywords": result.get("ats_keywords", [])
+        }
 
+    except asyncio.TimeoutError:
+        logging.error("AI optimization timeout")
+        raise HTTPException(504, "Optimization timeout")
 
     except Exception as e:
-        print("❌ AI optimization failed:", str(e))
+        logging.error(f"AI optimization failed: {str(e)}")
 
         return {
             "missing_skills": [],
@@ -200,17 +217,15 @@ async def optimize_resume(payload: dict):
             "ats_keywords": []
         }
 
-
 # =====================================================
 # DOWNLOAD OPTIMIZED RESUME PDF
 # =====================================================
-from fastapi import Form
 
 @app.post("/resume/download")
 async def download_resume(
+    background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     job_description: str = Form(...)
-   # job_description: str = ""
 ):
 
     resume_text = await extract_resume_text(file)
@@ -219,18 +234,35 @@ async def download_resume(
         raise HTTPException(400, "Missing job description")
 
     try:
-        optimized = optimize_resume_ai(resume_text, job_description)
+        optimized = await asyncio.wait_for(
+            asyncio.to_thread(
+                optimize_resume_ai,
+                resume_text,
+                job_description
+            ),
+            timeout=25
+        )
 
         resume_data = {
-            "name": "Optimised Resume",
+            "name": "Optimized Resume",
             "contact": "",
-            "summary":optimized.get("summary", ""),
+            "summary": optimized.get("summary", ""),
             "skills": optimized.get("skills", []),
-            "experience_improvements": optimized.get("experience_improvements", []),
-            "project_improvements": optimized.get("project_improvements", [])
+            "experience_improvements":
+                optimized.get("experience_improvements", []),
+            "project_improvements":
+                optimized.get("project_improvements", [])
         }
 
-        pdf_path = build_resume_pdf(resume_data)
+        pdf_path = await asyncio.to_thread(
+            build_resume_pdf,
+            resume_data
+        )
+
+        # Cleanup after sending
+        background_tasks.add_task(os.remove, pdf_path)
+
+        logging.info("Optimized resume generated")
 
         return FileResponse(
             pdf_path,
@@ -238,6 +270,11 @@ async def download_resume(
             filename="optimized_resume.pdf"
         )
 
+    except asyncio.TimeoutError:
+        logging.error("Resume generation timeout")
+        raise HTTPException(504, "Resume generation timeout")
+
     except Exception as e:
-        print("❌ Resume download failed:", str(e))
+        logging.error(f"Resume download failed: {str(e)}")
         raise HTTPException(500, "Failed to generate resume")
+
