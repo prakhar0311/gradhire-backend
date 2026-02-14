@@ -311,7 +311,8 @@ async def download_resume(
 
             "summary": optimized.get("summary", ""),
 
-            "skills": optimized.get("skills", []),
+            # ✅ FIX: default should be {} not []
+            "skills": optimized.get("skills", {}),
 
             "experience": optimized.get("experience", []),
 
@@ -333,6 +334,6 @@ async def download_resume(
         logging.error(f"Resume generation failed: {e}")
 
         raise HTTPException(
-            500,
-            "Failed to generate optimized resume"
+            status_code=500,
+            detail="Failed to generate optimized resume"
         )

@@ -1,10 +1,19 @@
 import os
 import json
-#import re
+import re
 from openai import OpenAI
 
 
+# =====================================================
+# OPENAI CLIENT
+# =====================================================
+
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+
+
+# =====================================================
+# SYSTEM PROMPT
+# =====================================================
 
 SYSTEM_PROMPT = """
 You are a professional FAANG resume editor specializing in junior software engineers and new graduates.
@@ -57,7 +66,7 @@ Return ONLY valid JSON in this EXACT format:
 
 Rules:
 - missing_skills: 4–8 important skills present in job description but missing in resume
-- Skills: 6–10 strongest skills from resume
+- Skills: 6–12 strongest skills from resume
 - Experience: max 3 roles
 - Projects: 2–3 projects
 - Each role/project: 3–4 bullets
@@ -69,30 +78,33 @@ MAX_TEXT_LENGTH = 4000
 MAX_TOKENS = 800
 
 
-#def extract_json(text: str) -> dict:
-
-    #match = re.search(r"\{.*\}", text, re.DOTALL)
-
-    #if not match:
-        #raise ValueError("No JSON found in AI response")
-
-    #return json.loads(match.group())
-
+# =====================================================
+# SAFE LIST HANDLER
+# =====================================================
 
 def safe_list(value, limit=None):
 
     if not isinstance(value, list):
         return []
 
-    clean = [item for item in value if isinstance(item, (dict, str))]
+    clean = []
+
+    for item in value:
+        if isinstance(item, (dict, str)):
+            clean.append(item)
 
     return clean[:limit] if limit else clean
 
+
+# =====================================================
+# FALLBACK CONTACT EXTRACTION
+# =====================================================
 
 def fallback_extract_contact(resume_text: str):
 
     email = re.search(r'[\w\.-]+@[\w\.-]+', resume_text)
     phone = re.search(r'\+?\d[\d\s\-]{8,}', resume_text)
+    linkedin = re.search(r'linkedin\.com\/\S+', resume_text)
 
     parts = []
 
@@ -102,21 +114,96 @@ def fallback_extract_contact(resume_text: str):
     if phone:
         parts.append(phone.group())
 
+    if linkedin:
+        parts.append(linkedin.group())
+
     return " | ".join(parts)
 
+
+# =====================================================
+# FALLBACK NAME EXTRACTION
+# =====================================================
 
 def fallback_extract_name(resume_text: str):
 
     lines = resume_text.split("\n")
 
-    if lines:
-        first = lines[0].strip()
+    for line in lines[:5]:
+        line = line.strip()
 
-        if len(first) < 60:
-            return first
+        if 3 < len(line) < 50 and not any(char.isdigit() for char in line):
+            return line
 
     return "Candidate Name"
 
+
+# =====================================================
+# SKILL CATEGORIZATION (FAANG STYLE)
+# =====================================================
+
+LANGUAGES = {
+    "python", "java", "javascript", "typescript",
+    "c", "c++", "c#", "swift", "kotlin",
+    "go", "ruby", "php", "sql"
+}
+
+FRAMEWORKS = {
+    "react", "react.js", "next.js", "angular",
+    "vue", "node", "node.js", "express",
+    "flask", "django", "spring", "spring boot",
+    "swiftui"
+}
+
+TOOLS = {
+    "git", "docker", "aws", "linux",
+    "postgresql", "mongodb", "firebase",
+    "xcode", "kubernetes"
+}
+
+CONCEPTS = {
+    "rest api", "restful apis",
+    "microservices",
+    "ci/cd",
+    "oop",
+    "object oriented programming",
+    "cloud computing"
+}
+
+
+def categorize_skills(skills_list):
+
+    categories = {
+        "Languages": [],
+        "Frameworks": [],
+        "Tools": [],
+        "Concepts": []
+    }
+
+    for skill in skills_list:
+
+        if not isinstance(skill, str):
+            continue
+
+        s = skill.lower()
+
+        if s in LANGUAGES:
+            categories["Languages"].append(skill)
+
+        elif s in FRAMEWORKS:
+            categories["Frameworks"].append(skill)
+
+        elif s in TOOLS:
+            categories["Tools"].append(skill)
+
+        else:
+            categories["Concepts"].append(skill)
+
+    return categories
+
+
+# =====================================================
+# MAIN OPTIMIZER FUNCTION
+# =====================================================
 
 def optimize_resume_ai(resume_text: str, job_description: str) -> dict:
 
@@ -126,12 +213,15 @@ def optimize_resume_ai(resume_text: str, job_description: str) -> dict:
 
             model="gpt-4o-mini",
 
-            temperature=0,  # IMPORTANT: makes output deterministic
+            temperature=0,
 
-            response_format={"type": "json_object"},  # CRITICAL FIX
+            response_format={"type": "json_object"},
 
             messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
+                {
+                    "role": "system",
+                    "content": SYSTEM_PROMPT
+                },
                 {
                     "role": "user",
                     "content": f"""
@@ -148,33 +238,66 @@ Job Description:
             timeout=30
         )
 
-        parsed = json.loads(response.choices[0].message.content)
+        parsed = json.loads(
+            response.choices[0].message.content
+        )
+
+        # Safe fallback extraction
+        name = parsed.get("name") or fallback_extract_name(resume_text)
+
+        contact = parsed.get("contact") or fallback_extract_contact(resume_text)
+
+        raw_skills = safe_list(parsed.get("skills"), 12)
+
+        categorized_skills = categorize_skills(raw_skills)
 
         return {
-            "name": parsed.get("name", "Candidate Name"),
-            "contact": parsed.get("contact", ""),
+
+            "name": name,
+
+            "contact": contact,
+
             "summary": parsed.get("summary", ""),
-             
-            # UI Only (this appears in ui only)
+
+            # UI only
             "missing_skills": safe_list(parsed.get("missing_skills"), 8),
 
+            # Resume + ATS
+            "skills": categorized_skills,
 
-            "skills": parsed.get("skills", [])[:10],
-            "experience": parsed.get("experience", [])[:3],
-            "projects": parsed.get("projects", [])[:3],
-            "education": parsed.get("education", [])[:2],
+            "experience": safe_list(parsed.get("experience"), 3),
+
+            "projects": safe_list(parsed.get("projects"), 3),
+
+            "education": safe_list(parsed.get("education"), 2),
         }
+
 
     except Exception as e:
 
         print("❌ OpenAI error:", str(e))
 
         return {
-            "name": "Candidate Name",
-            "contact": "",
+
+            "name": fallback_extract_name(resume_text),
+
+            "contact": fallback_extract_contact(resume_text),
+
             "summary": "",
-            "skills": [],
+
+            "missing_skills": [],
+
+            "skills": {
+                "Languages": [],
+                "Frameworks": [],
+                "Tools": [],
+                "Concepts": []
+            },
+
             "experience": [],
+
             "projects": [],
+
             "education": [],
         }
+

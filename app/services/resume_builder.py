@@ -4,7 +4,8 @@ from reportlab.pdfgen import canvas
 
 
 # =====================================================
-# GradHire FAANG Resume Builder v3 (Production Ready)
+# GradHire FAANG Resume Builder v4 (Production Ready)
+# Supports categorized technical skills
 # One-Page Optimized
 # =====================================================
 
@@ -26,11 +27,11 @@ ITEM_SPACING = 10
 def build_resume_pdf(data: dict) -> str:
 
     filename = f"/tmp/resume_{uuid.uuid4().hex}.pdf"
-    #os.chmod(filename, 0o644)
 
     c = canvas.Canvas(filename, pagesize=LETTER)
 
     y = PAGE_HEIGHT - MARGIN
+
 
     # =====================================================
     # Helpers
@@ -152,14 +153,33 @@ def build_resume_pdf(data: dict) -> str:
 
 
     # =====================================================
-    # SKILLS
+    # SKILLS (UPDATED FOR CATEGORIZED SKILLS)
     # =====================================================
 
-    skills = data.get("skills", [])
+    skills = data.get("skills", {})
 
-    if skills:
+    if isinstance(skills, dict) and skills:
 
-        section("Skills")
+        section("Technical Skills")
+
+        order = ["Languages", "Frameworks", "Tools", "Concepts"]
+
+        for category in order:
+
+            items = skills.get(category, [])
+
+            if not items:
+                continue
+
+            category_line = f"{category}: {', '.join(items)}"
+
+            draw_paragraph(category_line)
+
+
+    # fallback if list (older format)
+    elif isinstance(skills, list) and skills:
+
+        section("Technical Skills")
 
         draw_paragraph(", ".join(skills))
 
@@ -278,3 +298,4 @@ def build_resume_pdf(data: dict) -> str:
     c.save()
 
     return filename
+
