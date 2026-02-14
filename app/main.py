@@ -252,19 +252,26 @@ async def optimize_resume(request: OptimizeRequest):
             request.job_description
         )
 
-        # Extract bullets safely from experience
         improved_bullets = []
 
         for job in result.get("experience", []):
             improved_bullets.extend(job.get("bullets", []))
 
-        # Limit to 5 bullets max
         improved_bullets = improved_bullets[:5]
+
+        # FIX: flatten categorized skills for frontend
+        skills_dict = result.get("skills", {})
+
+        ats_keywords = []
+
+        if isinstance(skills_dict, dict):
+            for category in skills_dict.values():
+                ats_keywords.extend(category)
 
         return {
             "missing_skills": result.get("missing_skills", []),
             "improved_bullets": improved_bullets,
-            "ats_keywords": result.get("skills", [])
+            "ats_keywords": ats_keywords[:10]
         }
 
     except Exception as e:
@@ -275,6 +282,7 @@ async def optimize_resume(request: OptimizeRequest):
             status_code=500,
             detail="Resume optimization failed"
         )
+
 
 
 
