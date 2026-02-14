@@ -238,7 +238,17 @@ Job Description:
             timeout=30
         )
 
-        parsed = response.choices[0].message.parsed
+        content = response.choices[0].message.content
+
+        content = content.strip()
+
+        if content.startswith("```json"):
+          content = content.replace("```json", "").replace("```", "")
+        elif content.startswith("```"):
+          content = content.replace("```", "")
+
+        parsed = json.loads(content)
+
 
 
         # Safe fallback extraction
