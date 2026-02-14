@@ -63,14 +63,6 @@ Return ONLY valid JSON in this EXACT format:
     }
   ]
 }
-
-Rules:
-- missing_skills: 4–8 important skills present in job description but missing in resume
-- Skills: 6–12 strongest skills from resume
-- Experience: max 3 roles
-- Projects: 2–3 projects
-- Each role/project: 3–4 bullets
-- Output raw JSON only
 """
 
 
@@ -79,7 +71,7 @@ MAX_TOKENS = 800
 
 
 # =====================================================
-# SAFE LIST HANDLER
+# SAFE LIST
 # =====================================================
 
 def safe_list(value, limit=None):
@@ -90,17 +82,19 @@ def safe_list(value, limit=None):
     clean = []
 
     for item in value:
+
         if isinstance(item, (dict, str)):
+
             clean.append(item)
 
     return clean[:limit] if limit else clean
 
 
 # =====================================================
-# FALLBACK CONTACT EXTRACTION
+# FALLBACK CONTACT
 # =====================================================
 
-def fallback_extract_contact(resume_text: str):
+def fallback_extract_contact(resume_text):
 
     email = re.search(r'[\w\.-]+@[\w\.-]+', resume_text)
     phone = re.search(r'\+?\d[\d\s\-]{8,}', resume_text)
@@ -121,54 +115,56 @@ def fallback_extract_contact(resume_text: str):
 
 
 # =====================================================
-# FALLBACK NAME EXTRACTION
+# FALLBACK NAME
 # =====================================================
 
-def fallback_extract_name(resume_text: str):
+def fallback_extract_name(resume_text):
 
-    lines = resume_text.split("\n")
+    for line in resume_text.split("\n")[:5]:
 
-    for line in lines[:5]:
         line = line.strip()
 
         if 3 < len(line) < 50 and not any(char.isdigit() for char in line):
+
             return line
 
     return "Candidate Name"
 
 
 # =====================================================
-# SKILL CATEGORIZATION (FAANG STYLE)
+# SKILL CATEGORIES
 # =====================================================
 
 LANGUAGES = {
-    "python", "java", "javascript", "typescript",
-    "c", "c++", "c#", "swift", "kotlin",
-    "go", "ruby", "php", "sql"
+    "python","java","javascript","typescript",
+    "c","c++","c#","swift","kotlin",
+    "go","ruby","php","sql"
 }
 
 FRAMEWORKS = {
-    "react", "react.js", "next.js", "angular",
-    "vue", "node", "node.js", "express",
-    "flask", "django", "spring", "spring boot",
+    "react","react.js","next.js","angular",
+    "vue","node","node.js","express",
+    "flask","django","spring","spring boot",
     "swiftui"
 }
 
 TOOLS = {
-    "git", "docker", "aws", "linux",
-    "postgresql", "mongodb", "firebase",
-    "xcode", "kubernetes"
+    "git","docker","aws","linux",
+    "postgresql","mongodb","firebase",
+    "xcode","kubernetes"
 }
 
 CONCEPTS = {
-    "rest api", "restful apis",
-    "microservices",
-    "ci/cd",
-    "oop",
-    "object oriented programming",
+    "rest api","restful apis",
+    "microservices","ci/cd",
+    "oop","object oriented programming",
     "cloud computing"
 }
 
+
+# =====================================================
+# SKILL CATEGORIZATION
+# =====================================================
 
 def categorize_skills(skills_list):
 
@@ -179,33 +175,58 @@ def categorize_skills(skills_list):
         "Concepts": []
     }
 
+    seen = set()
+
     for skill in skills_list:
 
         if not isinstance(skill, str):
             continue
 
-        s = skill.lower()
+        skill_clean = skill.strip()
+        skill_lower = skill_clean.lower()
 
-        if s in LANGUAGES:
-            categories["Languages"].append(skill)
+        if skill_lower in seen:
+            continue
 
-        elif s in FRAMEWORKS:
-            categories["Frameworks"].append(skill)
+        seen.add(skill_lower)
 
-        elif s in TOOLS:
-            categories["Tools"].append(skill)
+        if skill_lower in LANGUAGES:
+            categories["Languages"].append(skill_clean)
+
+        elif skill_lower in FRAMEWORKS:
+            categories["Frameworks"].append(skill_clean)
+
+        elif skill_lower in TOOLS:
+            categories["Tools"].append(skill_clean)
 
         else:
-            categories["Concepts"].append(skill)
+            categories["Concepts"].append(skill_clean)
 
     return categories
 
 
 # =====================================================
-# MAIN OPTIMIZER FUNCTION
+# SAFE JSON PARSE
 # =====================================================
 
-def optimize_resume_ai(resume_text: str, job_description: str) -> dict:
+def safe_json_parse(content):
+
+    try:
+        return json.loads(content)
+    except:
+        try:
+            start = content.find("{")
+            end = content.rfind("}") + 1
+            return json.loads(content[start:end])
+        except:
+            return {}
+
+
+# =====================================================
+# MAIN OPTIMIZER
+# =====================================================
+
+def optimize_resume_ai(resume_text, job_description):
 
     try:
 
@@ -218,10 +239,7 @@ def optimize_resume_ai(resume_text: str, job_description: str) -> dict:
             response_format={"type": "json_object"},
 
             messages=[
-                {
-                    "role": "system",
-                    "content": SYSTEM_PROMPT
-                },
+                {"role": "system", "content": SYSTEM_PROMPT},
                 {
                     "role": "user",
                     "content": f"""
@@ -234,24 +252,15 @@ Job Description:
                 }
             ],
 
-            max_tokens=MAX_TOKENS,
-            timeout=30
+            max_tokens=MAX_TOKENS
         )
 
-        content = response.choices[0].message.content
 
-        content = content.strip()
+        content = response.choices[0].message.content.strip()
 
-        if content.startswith("```json"):
-          content = content.replace("```json", "").replace("```", "")
-        elif content.startswith("```"):
-          content = content.replace("```", "")
-
-        parsed = json.loads(content)
+        parsed = safe_json_parse(content)
 
 
-
-        # Safe fallback extraction
         name = parsed.get("name") or fallback_extract_name(resume_text)
 
         contact = parsed.get("contact") or fallback_extract_contact(resume_text)
@@ -259,6 +268,7 @@ Job Description:
         raw_skills = safe_list(parsed.get("skills"), 12)
 
         categorized_skills = categorize_skills(raw_skills)
+
 
         return {
 
@@ -268,10 +278,8 @@ Job Description:
 
             "summary": parsed.get("summary", ""),
 
-            # UI only
             "missing_skills": safe_list(parsed.get("missing_skills"), 8),
 
-            # Resume + ATS
             "skills": categorized_skills,
 
             "experience": safe_list(parsed.get("experience"), 3),
@@ -284,7 +292,7 @@ Job Description:
 
     except Exception as e:
 
-        print("❌ OpenAI error:", str(e))
+        print("❌ OpenAI error:", e)
 
         return {
 
@@ -309,4 +317,3 @@ Job Description:
 
             "education": [],
         }
-

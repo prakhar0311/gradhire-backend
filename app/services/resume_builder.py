@@ -4,9 +4,10 @@ from reportlab.pdfgen import canvas
 
 
 # =====================================================
-# GradHire FAANG Resume Builder v4 (Production Ready)
+# GradHire FAANG Resume Builder v5 (Production Ready)
 # Supports categorized technical skills
-# One-Page Optimized
+# One-page optimized
+# Fully safe against malformed AI output
 # =====================================================
 
 MAX_BULLETS_PER_ROLE = 4
@@ -32,24 +33,30 @@ def build_resume_pdf(data: dict) -> str:
 
     y = PAGE_HEIGHT - MARGIN
 
-
     # =====================================================
     # Helpers
     # =====================================================
 
     def draw_text(text, x, y_pos, font=FONT, size=10):
+        if not text:
+            return
         c.setFont(font, size)
-        c.drawString(x, y_pos, text)
+        c.drawString(x, y_pos, str(text))
 
 
     def draw_right(text, y_pos, size=10):
+        if not text:
+            return
         c.setFont(FONT, size)
-        c.drawRightString(PAGE_WIDTH - MARGIN, y_pos, text)
+        c.drawRightString(PAGE_WIDTH - MARGIN, y_pos, str(text))
 
 
     def wrap_text(text, max_width, font=FONT, size=10):
 
-        words = text.split()
+        if not text:
+            return []
+
+        words = str(text).split()
 
         lines = []
         current = ""
@@ -63,7 +70,8 @@ def build_resume_pdf(data: dict) -> str:
             if width <= max_width:
                 current = test
             else:
-                lines.append(current)
+                if current:
+                    lines.append(current)
                 current = word
 
         if current:
@@ -75,6 +83,9 @@ def build_resume_pdf(data: dict) -> str:
     def draw_paragraph(text, indent=0):
 
         nonlocal y
+
+        if not text:
+            return
 
         max_width = PAGE_WIDTH - MARGIN * 2 - indent
 
@@ -88,6 +99,9 @@ def build_resume_pdf(data: dict) -> str:
     def draw_bullet(text):
 
         nonlocal y
+
+        if not text:
+            return
 
         bullet_x = MARGIN + 4
         text_x = MARGIN + 14
@@ -113,6 +127,9 @@ def build_resume_pdf(data: dict) -> str:
 
         nonlocal y
 
+        if not title:
+            return
+
         y -= SECTION_SPACING
 
         draw_text(title.upper(), MARGIN, y, FONT_BOLD, 12)
@@ -128,13 +145,13 @@ def build_resume_pdf(data: dict) -> str:
     # HEADER
     # =====================================================
 
-    name = data.get("name", "Candidate Name")
+    name = data.get("name") or "Candidate Name"
 
     draw_text(name, MARGIN, y, FONT_BOLD, 20)
 
     y -= 20
 
-    contact = data.get("contact", "")
+    contact = data.get("contact")
 
     if contact:
         draw_text(contact, MARGIN, y, FONT, 10)
@@ -153,10 +170,10 @@ def build_resume_pdf(data: dict) -> str:
 
 
     # =====================================================
-    # SKILLS (UPDATED FOR CATEGORIZED SKILLS)
+    # SKILLS (FINAL PRODUCTION SAFE)
     # =====================================================
 
-    skills = data.get("skills", {})
+    skills = data.get("skills")
 
     if isinstance(skills, dict) and skills:
 
@@ -166,22 +183,37 @@ def build_resume_pdf(data: dict) -> str:
 
         for category in order:
 
-            items = skills.get(category, [])
+            items = skills.get(category)
 
-            if not items:
+            if not isinstance(items, list):
                 continue
 
-            category_line = f"{category}: {', '.join(items)}"
+            clean_items = [
+                str(item).strip()
+                for item in items
+                if isinstance(item, str) and item.strip()
+            ]
+
+            if not clean_items:
+                continue
+
+            category_line = f"{category}: {', '.join(clean_items)}"
 
             draw_paragraph(category_line)
 
 
-    # fallback if list (older format)
     elif isinstance(skills, list) and skills:
 
         section("Technical Skills")
 
-        draw_paragraph(", ".join(skills))
+        clean_items = [
+            str(item).strip()
+            for item in skills
+            if isinstance(item, str) and item.strip()
+        ]
+
+        if clean_items:
+            draw_paragraph(", ".join(clean_items))
 
 
     # =====================================================
@@ -196,9 +228,9 @@ def build_resume_pdf(data: dict) -> str:
 
         for job in experience:
 
-            title = job.get("title", "Software Engineer")
+            title = job.get("title") or "Software Engineer"
 
-            duration = job.get("duration", "")
+            duration = job.get("duration")
 
             draw_text(title, MARGIN, y, FONT_BOLD, 11)
 
@@ -207,9 +239,9 @@ def build_resume_pdf(data: dict) -> str:
 
             y -= LINE_SPACING
 
-            company = job.get("company", "")
+            company = job.get("company") or ""
 
-            location = job.get("location", "")
+            location = job.get("location") or ""
 
             company_line = company
 
@@ -240,7 +272,7 @@ def build_resume_pdf(data: dict) -> str:
 
         for project in projects:
 
-            title = project.get("title", "Project")
+            title = project.get("title") or "Project"
 
             draw_text(title, MARGIN, y, FONT_BOLD, 11)
 
@@ -266,9 +298,9 @@ def build_resume_pdf(data: dict) -> str:
 
         for edu in education:
 
-            degree = edu.get("degree", "")
+            degree = edu.get("degree") or ""
 
-            duration = edu.get("duration", "")
+            duration = edu.get("duration")
 
             draw_text(degree, MARGIN, y, FONT_BOLD, 11)
 
@@ -277,9 +309,9 @@ def build_resume_pdf(data: dict) -> str:
 
             y -= LINE_SPACING
 
-            school = edu.get("school", "")
+            school = edu.get("school") or ""
 
-            location = edu.get("location", "")
+            location = edu.get("location") or ""
 
             school_line = school
 
@@ -298,4 +330,3 @@ def build_resume_pdf(data: dict) -> str:
     c.save()
 
     return filename
-
