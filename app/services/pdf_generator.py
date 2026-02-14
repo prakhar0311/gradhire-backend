@@ -1,5 +1,6 @@
 # app/services/pdf_generator.py
 
+import uuid
 from reportlab.platypus import (
     SimpleDocTemplate,
     Paragraph,
@@ -8,18 +9,15 @@ from reportlab.platypus import (
     ListItem
 )
 from reportlab.lib.pagesizes import LETTER
-from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-from reportlab.lib.enums import TA_LEFT
-from reportlab.pdfbase import pdfmetrics
-from reportlab.pdfbase.cidfonts import UnicodeCIDFont
-
-# Unicode font for ATS-safe resumes
-pdfmetrics.registerFont(UnicodeCIDFont("STSong-Light"))
+from reportlab.lib.styles import ParagraphStyle
 
 
-def generate_resume_pdf(resume_data: dict, output_path: str):
+def generate_resume_pdf(resume_data: dict, output_path: str | None = None):
     """
-    Generate ATS-friendly resume PDF.
+    Production-ready FAANG resume PDF generator.
+
+    Uses clean ATS-optimized formatting.
+    One-page optimized for new grads.
 
     resume_data format:
 
@@ -32,129 +30,222 @@ def generate_resume_pdf(resume_data: dict, output_path: str):
             {
                 "title": str,
                 "company": str,
+                "location": str,
+                "duration": str,
                 "bullets": [str]
             }
         ],
-        "education": [str]
+        "projects": [
+            {
+                "title": str,
+                "bullets": [str]
+            }
+        ],
+        "education": [
+            {
+                "degree": str,
+                "school": str,
+                "duration": str
+            }
+        ]
     }
     """
 
-    styles = getSampleStyleSheet()
+    if not output_path:
+        output_path = f"/tmp/resume_{uuid.uuid4().hex}.pdf"
+
+    # =====================
+    # Styles
+    # =====================
 
     header_style = ParagraphStyle(
-        "Header",
-        fontName="STSong-Light",
+        name="Header",
+        fontName="Helvetica-Bold",
         fontSize=18,
-        spaceAfter=10,
-        alignment=TA_LEFT,
+        spaceAfter=6,
+    )
+
+    contact_style = ParagraphStyle(
+        name="Contact",
+        fontName="Helvetica",
+        fontSize=10,
+        spaceAfter=12,
     )
 
     section_style = ParagraphStyle(
-        "Section",
-        fontName="STSong-Light",
-        fontSize=12,
-        spaceAfter=6,
-        spaceBefore=10,
-        leading=14,
+        name="Section",
+        fontName="Helvetica-Bold",
+        fontSize=11,
+        spaceBefore=8,
+        spaceAfter=4,
     )
 
     body_style = ParagraphStyle(
-        "Body",
-        fontName="STSong-Light",
+        name="Body",
+        fontName="Helvetica",
         fontSize=10,
         leading=14,
     )
+
+    bullet_style = ParagraphStyle(
+        name="Bullet",
+        fontName="Helvetica",
+        fontSize=10,
+        leading=14,
+        leftIndent=4,
+    )
+
+    # =====================
+    # Document
+    # =====================
 
     doc = SimpleDocTemplate(
         output_path,
         pagesize=LETTER,
         leftMargin=50,
         rightMargin=50,
-        topMargin=50,
-        bottomMargin=50,
+        topMargin=40,
+        bottomMargin=40,
     )
 
     elements = []
 
-    # =========================
-    # HEADER
-    # =========================
+    # =====================
+    # Header
+    # =====================
 
-    if resume_data.get("name"):
-        elements.append(Paragraph(resume_data["name"], header_style))
+    name = resume_data.get("name", "Candidate Name")
+    elements.append(Paragraph(name, header_style))
 
-    if resume_data.get("contact"):
-        elements.append(Paragraph(resume_data["contact"], body_style))
-        elements.append(Spacer(1, 12))
+    contact = resume_data.get("contact", "")
+    if contact:
+        elements.append(Paragraph(contact, contact_style))
 
-    # =========================
-    # SUMMARY
-    # =========================
+    # =====================
+    # Summary
+    # =====================
 
-    if resume_data.get("summary"):
-        elements.append(Paragraph("<b>Summary</b>", section_style))
-        elements.append(Paragraph(resume_data["summary"], body_style))
-        elements.append(Spacer(1, 8))
+    summary = resume_data.get("summary")
+    if summary:
+        elements.append(Paragraph("SUMMARY", section_style))
+        elements.append(Paragraph(summary, body_style))
 
-    # =========================
-    # SKILLS
-    # =========================
+    # =====================
+    # Skills
+    # =====================
 
-    if resume_data.get("skills"):
-        elements.append(Paragraph("<b>Skills</b>", section_style))
+    skills = resume_data.get("skills", [])
+    if skills:
+        elements.append(Paragraph("SKILLS", section_style))
+        elements.append(
+            Paragraph(", ".join(skills), body_style)
+        )
 
-        skills_text = ", ".join(resume_data["skills"])
-        elements.append(Paragraph(skills_text, body_style))
-        elements.append(Spacer(1, 8))
+    # =====================
+    # Experience
+    # =====================
 
-    # =========================
-    # EXPERIENCE
-    # =========================
+    experience = resume_data.get("experience", [])
 
-    if resume_data.get("experience"):
-        elements.append(Paragraph("<b>Experience</b>", section_style))
+    if experience:
+        elements.append(Paragraph("EXPERIENCE", section_style))
 
-        for job in resume_data["experience"]:
+        for job in experience:
 
-            if job.get("title"):
-                elements.append(
-                    Paragraph(f"<b>{job['title']}</b>", body_style)
+            title_line = f"<b>{job.get('title','')}</b>"
+            elements.append(Paragraph(title_line, body_style))
+
+            meta = " — ".join(
+                filter(None, [
+                    job.get("company"),
+                    job.get("location"),
+                    job.get("duration")
+                ])
+            )
+
+            if meta:
+                elements.append(Paragraph(meta, body_style))
+
+            bullets = [
+                ListItem(
+                    Paragraph(bullet, bullet_style)
                 )
-
-            if job.get("company"):
-                elements.append(
-                    Paragraph(job["company"], body_style)
-                )
-
-            bullets = []
-
-            for bullet in job.get("bullets", []):
-                bullets.append(
-                    ListItem(Paragraph(bullet, body_style))
-                )
+                for bullet in job.get("bullets", [])[:4]
+            ]
 
             elements.append(
                 ListFlowable(
                     bullets,
                     bulletType="bullet",
-                    leftIndent=20
+                    leftIndent=14
                 )
             )
 
-            elements.append(Spacer(1, 6))
+    # =====================
+    # Projects
+    # =====================
 
-    # =========================
-    # EDUCATION
-    # =========================
+    projects = resume_data.get("projects", [])
 
-    if resume_data.get("education"):
-        elements.append(Paragraph("<b>Education</b>", section_style))
+    if projects:
+        elements.append(Paragraph("PROJECTS", section_style))
 
-        for edu in resume_data["education"]:
-            elements.append(Paragraph(edu, body_style))
+        for project in projects:
 
-    # =========================
-    # BUILD PDF
-    # =========================
+            elements.append(
+                Paragraph(
+                    f"<b>{project.get('title','')}</b>",
+                    body_style
+                )
+            )
+
+            bullets = [
+                ListItem(
+                    Paragraph(bullet, bullet_style)
+                )
+                for bullet in project.get("bullets", [])[:4]
+            ]
+
+            elements.append(
+                ListFlowable(
+                    bullets,
+                    bulletType="bullet",
+                    leftIndent=14
+                )
+            )
+
+    # =====================
+    # Education
+    # =====================
+
+    education = resume_data.get("education", [])
+
+    if education:
+        elements.append(Paragraph("EDUCATION", section_style))
+
+        for edu in education:
+
+            elements.append(
+                Paragraph(
+                    f"<b>{edu.get('degree','')}</b>",
+                    body_style
+                )
+            )
+
+            meta = " — ".join(
+                filter(None, [
+                    edu.get("school"),
+                    edu.get("duration")
+                ])
+            )
+
+            if meta:
+                elements.append(Paragraph(meta, body_style))
+
+    # =====================
+    # Build
+    # =====================
 
     doc.build(elements)
+
+    return output_path

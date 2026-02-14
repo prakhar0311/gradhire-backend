@@ -1,8 +1,8 @@
 import os
 import requests
 import re
-import random
 import uuid
+import logging
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -10,35 +10,43 @@ load_dotenv()
 ADZUNA_APP_ID = os.getenv("ADZUNA_APP_ID")
 ADZUNA_API_KEY = os.getenv("ADZUNA_API_KEY")
 
-# -------- CONFIG --------
-REQUEST_TIMEOUT = 5
+REQUEST_TIMEOUT = 6
 MAX_DESCRIPTION_LENGTH = 2000
 MAX_JOBS_RETURNED = 20
-MAX_PAGES_TO_SCAN = 3  # 🔥 scan multiple pages
+MAX_PAGES_TO_SCAN = 4
+MAX_RETRIES = 2
 
-# -------- STOPWORDS --------
 STOPWORDS = {
-    "the", "and", "to", "a", "of", "in", "for", "with",
-    "on", "at", "by", "an", "be", "is", "are", "as", "from", "or"
+    "the","and","to","a","of","in","for","with",
+    "on","at","by","an","be","is","are","as","from","or"
 }
 
-# -------- VISA FILTER --------
-VISA_KEYWORDS = [
-    "visa",
-    "sponsorship",
-    "h1b",
-    "opt",
-    "cpt",
-    "relocation"
-]
+TECH_KEYWORDS = {
+    "python","java","swift","react","javascript","node",
+    "aws","docker","sql","api","git","ios","android"
+}
 
-def is_visa_friendly(description: str) -> bool:
-    if not description:
-        return False
-    return any(word in description.lower() for word in VISA_KEYWORDS)
+VISA_KEYWORDS = {
+    "visa","sponsorship","h1b","opt","cpt","relocation"
+}
 
-# -------- TOKENIZER --------
+ENTRY_LEVEL_KEYWORDS = {
+    "junior","entry level","graduate","fresher",
+    "intern","trainee","associate","new grad"
+}
+
+SENIOR_KEYWORDS = {
+    "senior","lead","principal","staff",
+    "manager","architect","director"
+}
+
+
+# =====================================================
+# TOKENIZER
+# =====================================================
+
 def tokenize(text: str):
+
     if not text:
         return set()
 
@@ -49,33 +57,74 @@ def tokenize(text: str):
         if w not in STOPWORDS and len(w) > 2
     }
 
-# -------- MATCH SCORE --------
-def compute_match_score(resume_text: str, job_text: str) -> int:
+
+# =====================================================
+# MATCH SCORE (DETERMINISTIC, TRUSTABLE)
+# =====================================================
+
+def compute_match_score(resume_text: str, job_text: str):
 
     resume_words = tokenize(resume_text)
     job_words = tokenize(job_text)
 
     if not resume_words or not job_words:
-        return 40
+        return 35
 
     overlap = resume_words.intersection(job_words)
-    count = len(overlap)
 
-    if count >= 15:
-        base = 85
-    elif count >= 10:
-        base = 70
-    elif count >= 6:
-        base = 55
-    elif count >= 3:
-        base = 40
-    else:
-        base = 25
+    overlap_score = len(overlap)
 
-    return min(100, base + random.randint(0, 8))
+    tech_overlap = overlap.intersection(TECH_KEYWORDS)
 
-# -------- CLEAN DESCRIPTION --------
-def clean_description(text: str) -> str:
+    score = (
+        overlap_score * 3 +
+        len(tech_overlap) * 5
+    )
+
+    score = min(score, 95)
+
+    if score < 35:
+        score = 35
+
+    return int(score)
+
+
+# =====================================================
+# ENTRY LEVEL FILTER (STRICT)
+# =====================================================
+
+def is_entry_level(title: str, description: str):
+
+    text = f"{title} {description}".lower()
+
+    if any(word in text for word in SENIOR_KEYWORDS):
+        return False
+
+    if any(word in text for word in ENTRY_LEVEL_KEYWORDS):
+        return True
+
+    return True
+
+
+# =====================================================
+# VISA FILTER
+# =====================================================
+
+def is_visa_friendly(description: str):
+
+    if not description:
+        return False
+
+    text = description.lower()
+
+    return any(word in text for word in VISA_KEYWORDS)
+
+
+# =====================================================
+# CLEAN DESCRIPTION
+# =====================================================
+
+def clean_description(text: str):
 
     if not text:
         return ""
@@ -87,49 +136,11 @@ def clean_description(text: str) -> str:
 
     return text
 
-# -------- ENTRY LEVEL FILTER --------
 
-ENTRY_LEVEL_KEYWORDS = [
-    "junior",
-    "entry level",
-    "graduate",
-    "fresher",
-    "intern",
-    "trainee",
-    "associate",
-    "new grad",
-    "0-2",
-    "0 – 2",
-]
+# =====================================================
+# FETCH JOBS
+# =====================================================
 
-SENIOR_KEYWORDS = [
-    "senior",
-    "lead",
-    "principal",
-    "staff",
-    "manager",
-    "architect",
-    "5+",
-    "6+",
-    "7+",
-]
-
-def is_entry_level(title: str, description: str) -> bool:
-
-    text = f"{title} {description}".lower()
-
-    # reject obvious senior roles
-    if any(word in text for word in SENIOR_KEYWORDS):
-        return False
-
-    # prefer strong entry signals
-    if any(word in text for word in ENTRY_LEVEL_KEYWORDS):
-        return True
-
-    # allow neutral roles but not management
-    return True
-
-# -------- FETCH JOBS --------
 def fetch_jobs(
     query: str,
     country: str = "in",
@@ -138,10 +149,14 @@ def fetch_jobs(
 ):
 
     if not ADZUNA_APP_ID or not ADZUNA_API_KEY:
-        print("❌ Missing Adzuna API keys")
+        logging.error("Missing Adzuna API keys")
         return []
 
+    if not query:
+        query = "software engineer"
+
     collected_jobs = []
+    seen_urls = set()
 
     for page in range(1, MAX_PAGES_TO_SCAN + 1):
 
@@ -151,67 +166,108 @@ def fetch_jobs(
             "app_id": ADZUNA_APP_ID,
             "app_key": ADZUNA_API_KEY,
             "what": query,
-            "results_per_page": limit,
+            "results_per_page": limit
         }
 
+        response = None
+
+        for attempt in range(MAX_RETRIES):
+
+            try:
+
+                response = requests.get(
+                    url,
+                    params=params,
+                    timeout=REQUEST_TIMEOUT
+                )
+
+                response.raise_for_status()
+                break
+
+            except requests.exceptions.RequestException as e:
+
+                logging.warning(
+                    f"Adzuna retry {attempt+1}: {str(e)}"
+                )
+
+        if not response:
+            continue
+
         try:
-            response = requests.get(
-                url,
-                params=params,
-                timeout=REQUEST_TIMEOUT
-            )
-
-            response.raise_for_status()
             data = response.json()
-
-        except requests.exceptions.Timeout:
-            print("⏱ Adzuna timeout")
-            break
-
-        except requests.exceptions.RequestException as e:
-            print("❌ Adzuna request failed:", str(e))
-            break
+        except:
+            continue
 
         for job in data.get("results", []):
 
             try:
-                title = job.get("title", "")
-                description_raw = job.get("description", "")
+
+                title = job.get("title") or ""
+                description_raw = job.get("description") or ""
+                redirect_url = job.get("redirect_url") or ""
+
+                if not redirect_url:
+                    continue
+
+                if redirect_url in seen_urls:
+                    continue
 
                 if not is_entry_level(title, description_raw):
                     continue
 
                 description = clean_description(description_raw)
 
-                if country == "us" and not is_visa_friendly(description):
-                    continue
+                if country == "us":
+                    if not is_visa_friendly(description):
+                        continue
 
                 score = compute_match_score(
                     resume_text,
                     description
                 )
 
-                collected_jobs.append({
-                    "id": str(uuid.uuid4()),
-                    "title": title or "Unknown",
-                    "company": job.get("company", {}).get("display_name") or "Unknown",
-                    "location": job.get("location", {}).get("display_name") or "Remote",
-                    "description": description,
-                    "matchScore": int(score),
-                    "applyURL": job.get("redirect_url") or ""
-                })
+                job_obj = {
 
-                # stop early if enough jobs collected
-                if len(collected_jobs) >= MAX_JOBS_RETURNED:
+                    "id": str(uuid.uuid4()),
+
+                    "title": title or "Software Engineer",
+
+                    "company":
+                    job.get("company", {})
+                    .get("display_name", "Unknown"),
+
+                    "location":
+                    job.get("location", {})
+                    .get("display_name", "Remote"),
+
+                    "description": description,
+
+                    "matchScore": score,
+
+                    "applyURL": redirect_url
+                }
+
+                collected_jobs.append(job_obj)
+
+                seen_urls.add(redirect_url)
+
+                if len(collected_jobs) >= limit:
                     break
 
             except Exception as e:
-                print("⚠️ Skipping bad job entry:", str(e))
+
+                logging.warning(
+                    f"Skipping bad job entry: {str(e)}"
+                )
+
                 continue
 
-        if len(collected_jobs) >= MAX_JOBS_RETURNED:
+        if len(collected_jobs) >= limit:
             break
 
-    collected_jobs.sort(key=lambda x: x["matchScore"], reverse=True)
+    collected_jobs.sort(
+        key=lambda x: x["matchScore"],
+        reverse=True
+    )
 
-    return collected_jobs[:MAX_JOBS_RETURNED]
+    return collected_jobs[:limit]
