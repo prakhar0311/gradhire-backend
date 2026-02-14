@@ -238,9 +238,8 @@ Job Description:
             timeout=30
         )
 
-        parsed = json.loads(
-            response.choices[0].message.content
-        )
+        parsed = response.choices[0].message.parsed
+
 
         # Safe fallback extraction
         name = parsed.get("name") or fallback_extract_name(resume_text)
