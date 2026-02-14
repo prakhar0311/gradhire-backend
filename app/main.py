@@ -252,36 +252,66 @@ async def optimize_resume(request: OptimizeRequest):
             request.job_description
         )
 
+        # -----------------------------
+        # Extract improved bullets
+        # -----------------------------
         improved_bullets = []
 
-        for job in result.get("experience", []):
-            improved_bullets.extend(job.get("bullets", []))
+        experience = result.get("experience", [])
+
+        if isinstance(experience, list):
+            for job in experience:
+                bullets = job.get("bullets", [])
+                if isinstance(bullets, list):
+                    improved_bullets.extend(bullets)
 
         improved_bullets = improved_bullets[:5]
 
-        # FIX: flatten categorized skills for frontend
-        skills_dict = result.get("skills", {})
-
+        # -----------------------------
+        # Flatten skills safely
+        # -----------------------------
         ats_keywords = []
 
-        if isinstance(skills_dict, dict):
-            for category in skills_dict.values():
-                ats_keywords.extend(category)
+        skills = result.get("skills", {})
 
+        if isinstance(skills, dict):
+
+            for key in ["Languages", "Frameworks", "Tools", "Concepts"]:
+
+                category = skills.get(key, [])
+
+                if isinstance(category, list):
+                    ats_keywords.extend(category)
+
+        # Final safety fallback
+        ats_keywords = [str(x) for x in ats_keywords if x][:10]
+
+        # -----------------------------
+        # Missing skills safety
+        # -----------------------------
+        missing_skills = result.get("missing_skills", [])
+
+        if not isinstance(missing_skills, list):
+            missing_skills = []
+
+        # -----------------------------
+        # FINAL RESPONSE (frontend expects THIS)
+        # -----------------------------
         return {
-            "missing_skills": result.get("missing_skills", []),
+            "missing_skills": missing_skills,
             "improved_bullets": improved_bullets,
-            "ats_keywords": ats_keywords[:10]
+            "ats_keywords": ats_keywords
         }
 
     except Exception as e:
 
-        logging.error(f"Optimize failed: {e}")
+        logging.error(f"Optimize failed: {str(e)}")
 
         raise HTTPException(
             status_code=500,
             detail="Resume optimization failed"
         )
+
 
 
 
