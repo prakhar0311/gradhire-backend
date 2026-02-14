@@ -268,23 +268,14 @@ async def optimize_resume(request: OptimizeRequest):
         improved_bullets = improved_bullets[:5]
 
         # -----------------------------
-        # Flatten skills safely
+        # ATS Keywords (flat list version)
         # -----------------------------
-        ats_keywords = []
+        ats_keywords = result.get("skills", [])
 
-        skills = result.get("skills", {})
+        if not isinstance(ats_keywords, list):
+            ats_keywords = []
 
-        if isinstance(skills, dict):
-
-            for key in ["Languages", "Frameworks", "Tools", "Concepts"]:
-
-                category = skills.get(key, [])
-
-                if isinstance(category, list):
-                    ats_keywords.extend(category)
-
-        # Final safety fallback
-        ats_keywords = [str(x) for x in ats_keywords if x][:10]
+        ats_keywords = ats_keywords[:10]
 
         # -----------------------------
         # Missing skills safety
@@ -295,7 +286,7 @@ async def optimize_resume(request: OptimizeRequest):
             missing_skills = []
 
         # -----------------------------
-        # FINAL RESPONSE (frontend expects THIS)
+        # FINAL RESPONSE
         # -----------------------------
         return {
             "missing_skills": missing_skills,
@@ -311,7 +302,6 @@ async def optimize_resume(request: OptimizeRequest):
             status_code=500,
             detail="Resume optimization failed"
         )
-
 
 
 
@@ -349,8 +339,8 @@ async def download_resume(
 
             "summary": optimized.get("summary", ""),
 
-            # ✅ FIX: default should be {} not []
-            "skills": optimized.get("skills", {}),
+            # ✅ revert back to LIST default
+            "skills": optimized.get("skills", []),
 
             "experience": optimized.get("experience", []),
 

@@ -4,10 +4,9 @@ from reportlab.pdfgen import canvas
 
 
 # =====================================================
-# GradHire FAANG Resume Builder v5 (Production Ready)
-# Supports categorized technical skills
+# GradHire FAANG Resume Builder (Stable Version)
+# Simple skills list (single line)
 # One-page optimized
-# Fully safe against malformed AI output
 # =====================================================
 
 MAX_BULLETS_PER_ROLE = 4
@@ -32,6 +31,7 @@ def build_resume_pdf(data: dict) -> str:
     c = canvas.Canvas(filename, pagesize=LETTER)
 
     y = PAGE_HEIGHT - MARGIN
+
 
     # =====================================================
     # Helpers
@@ -170,50 +170,24 @@ def build_resume_pdf(data: dict) -> str:
 
 
     # =====================================================
-    # SKILLS (FINAL PRODUCTION SAFE)
+    # SKILLS (NORMAL SIMPLE LIST)
     # =====================================================
 
-    skills = data.get("skills")
+    skills = data.get("skills", [])
 
-    if isinstance(skills, dict) and skills:
+    if isinstance(skills, list) and skills:
 
-        section("Technical Skills")
-
-        order = ["Languages", "Frameworks", "Tools", "Concepts"]
-
-        for category in order:
-
-            items = skills.get(category)
-
-            if not isinstance(items, list):
-                continue
-
-            clean_items = [
-                str(item).strip()
-                for item in items
-                if isinstance(item, str) and item.strip()
-            ]
-
-            if not clean_items:
-                continue
-
-            category_line = f"{category}: {', '.join(clean_items)}"
-
-            draw_paragraph(category_line)
-
-
-    elif isinstance(skills, list) and skills:
-
-        section("Technical Skills")
-
-        clean_items = [
-            str(item).strip()
-            for item in skills
-            if isinstance(item, str) and item.strip()
+        clean_skills = [
+            str(skill).strip()
+            for skill in skills
+            if isinstance(skill, str) and skill.strip()
         ]
 
-        if clean_items:
-            draw_paragraph(", ".join(clean_items))
+        if clean_skills:
+
+            section("Technical Skills")
+
+            draw_paragraph(", ".join(clean_skills))
 
 
     # =====================================================
