@@ -5,10 +5,17 @@ from openai import OpenAI
 
 
 # =====================================================
-# OPENAI CLIENT
+# OPENAI CLIENT (SAFE INITIALIZATION)
 # =====================================================
 
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+def get_openai_client():
+
+    api_key = os.getenv("OPENAI_API_KEY")
+
+    if not api_key:
+        raise ValueError("OPENAI_API_KEY not found in environment variables")
+
+    return OpenAI(api_key=api_key)
 
 
 # =====================================================
@@ -66,8 +73,9 @@ Return ONLY valid JSON in this EXACT format:
 """
 
 
+# Increased reliability
 MAX_TEXT_LENGTH = 4000
-MAX_TOKENS = 800
+MAX_TOKENS = 1200
 
 
 # =====================================================
@@ -152,91 +160,110 @@ def safe_json_parse(content):
 
 
 # =====================================================
-# MAIN OPTIMIZER (FINAL STABLE VERSION)
+# BUILD SAFE RESPONSE
+# =====================================================
+
+def build_safe_response(parsed, resume_text):
+
+    return {
+
+        "name": parsed.get("name") or fallback_extract_name(resume_text),
+
+        "contact": parsed.get("contact") or fallback_extract_contact(resume_text),
+
+        "summary": parsed.get("summary", ""),
+
+        "missing_skills": safe_list(parsed.get("missing_skills"), 8),
+
+        "skills": safe_list(parsed.get("skills"), 12),
+
+        "experience": safe_list(parsed.get("experience"), 3),
+
+        "projects": safe_list(parsed.get("projects"), 3),
+
+        "education": safe_list(parsed.get("education"), 2),
+    }
+
+
+# =====================================================
+# FALLBACK RESPONSE
+# =====================================================
+
+def fallback_response(resume_text):
+
+    return {
+
+        "name": fallback_extract_name(resume_text),
+
+        "contact": fallback_extract_contact(resume_text),
+
+        "summary": "",
+
+        "missing_skills": [],
+
+        "skills": [],
+
+        "experience": [],
+
+        "projects": [],
+
+        "education": [],
+    }
+
+
+# =====================================================
+# MAIN OPTIMIZER (PRODUCTION SAFE)
 # =====================================================
 
 def optimize_resume_ai(resume_text, job_description):
 
-    try:
+    client = get_openai_client()
 
-        response = client.chat.completions.create(
+    parsed = {}
 
-            model="gpt-4o-mini",
+    # Retry logic (2 attempts)
+    for attempt in range(2):
 
-            temperature=0,
+        try:
 
-            response_format={"type": "json_object"},
+            response = client.chat.completions.create(
 
-            messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
+                model="gpt-4o-mini",
 
-                {
-                    "role": "user",
-                    "content": f"""
+                temperature=0,
+
+                response_format={"type": "json_object"},
+
+                messages=[
+                    {"role": "system", "content": SYSTEM_PROMPT},
+
+                    {
+                        "role": "user",
+                        "content": f"""
 Resume:
 {resume_text[:MAX_TEXT_LENGTH]}
 
 Job Description:
 {job_description[:MAX_TEXT_LENGTH]}
 """
-                }
-            ],
+                    }
+                ],
 
-            max_tokens=MAX_TOKENS
-        )
+                max_tokens=MAX_TOKENS
+            )
 
+            content = response.choices[0].message.content.strip()
 
-        content = response.choices[0].message.content.strip()
+            parsed = safe_json_parse(content)
 
-        parsed = safe_json_parse(content)
+            print("AI parsed result:", parsed)
 
+            if parsed:
+                return build_safe_response(parsed, resume_text)
 
-        name = parsed.get("name") or fallback_extract_name(resume_text)
+        except Exception as e:
 
-        contact = parsed.get("contact") or fallback_extract_contact(resume_text)
+            print(f"❌ OpenAI attempt {attempt+1} failed:", e)
 
-
-        return {
-
-            "name": name,
-
-            "contact": contact,
-
-            "summary": parsed.get("summary", ""),
-
-            "missing_skills": safe_list(parsed.get("missing_skills"), 8),
-
-            # ✅ RETURN SIMPLE LIST (NOT categorized)
-            "skills": safe_list(parsed.get("skills"), 12),
-
-            "experience": safe_list(parsed.get("experience"), 3),
-
-            "projects": safe_list(parsed.get("projects"), 3),
-
-            "education": safe_list(parsed.get("education"), 2),
-        }
-
-
-    except Exception as e:
-
-        print("❌ OpenAI error:", e)
-
-        return {
-
-            "name": fallback_extract_name(resume_text),
-
-            "contact": fallback_extract_contact(resume_text),
-
-            "summary": "",
-
-            "missing_skills": [],
-
-            # ✅ RETURN EMPTY LIST
-            "skills": [],
-
-            "experience": [],
-
-            "projects": [],
-
-            "education": [],
-        }
+    # Final fallback
+    return fallback_response(resume_text)

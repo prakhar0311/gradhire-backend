@@ -1,11 +1,23 @@
+# =====================================================
+# LOAD ENVIRONMENT (MUST BE FIRST)
+# =====================================================
+
+from dotenv import load_dotenv
+import os
+
+load_dotenv()
+
+
+# =====================================================
+# IMPORTS
+# =====================================================
+
 from fastapi import FastAPI, UploadFile, File, Query, HTTPException, Form
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
-from dotenv import load_dotenv
 
 import pdfplumber
 import io
-import os
 import re
 import logging
 
@@ -14,12 +26,6 @@ from app.services.jobs import fetch_jobs
 from app.services.domain_classifier import generate_job_query
 from app.services.resume_builder import build_resume_pdf
 
-
-# =====================================================
-# LOAD ENVIRONMENT
-# =====================================================
-
-load_dotenv(dotenv_path=os.path.join(os.getcwd(), ".env"))
 
 # =====================================================
 # APP CONFIG
@@ -31,10 +37,10 @@ app = FastAPI(
     version="1.0.0"
 )
 
-MAX_FILE_SIZE = 5 * 1024 * 1024  # 5MB
+MAX_FILE_SIZE = 5 * 1024 * 1024
 ALLOWED_COUNTRIES = {"in", "us"}
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.WARNING)
 
 
 # =====================================================
@@ -59,56 +65,133 @@ def normalize_text(text: str) -> str:
 
 
 # =====================================================
-# RESUME DETECTION (TECH-FOCUSED)
+# INDUSTRY-GRADE RESUME VALIDATION (GradHire)
 # =====================================================
 
-RESUME_SIGNALS = [
-    "experience",
+TECH_KEYWORDS = {
+
+    # languages
+    "python", "java", "javascript", "typescript", "c++", "c#", "go", "swift",
+    "kotlin", "rust", "matlab", "r",
+
+    # web
+    "react", "angular", "vue", "node", "express", "html", "css",
+    "frontend", "backend", "fullstack",
+
+    # database
+    "sql", "mysql", "postgresql", "mongodb", "firebase", "redis",
+
+    # cloud / devops
+    "aws", "azure", "gcp", "docker", "kubernetes", "jenkins",
+    "ci/cd", "devops",
+
+    # mobile
+    "ios", "android", "flutter", "react native",
+
+    # AI/ML
+    "machine learning", "deep learning", "pytorch", "tensorflow",
+    "scikit", "neural network", "nlp", "computer vision",
+    "huggingface",
+
+    # tools / backend
+    "git", "github", "api", "rest", "fastapi", "flask", "django",
+
+    # data
+    "pandas", "numpy", "data analysis", "data science"
+}
+
+
+RESUME_SECTION_KEYWORDS = {
+
     "education",
-    "skills",
+    "experience",
     "projects",
-    "summary",
-    "work",
-    "university",
-    "bachelor",
-    "master",
-    "engineer",
-    "developer",
-]
+    "skills",
+    "technical skills",
+    "work experience",
+    "academic projects",
+    "internship",
+    "summary"
+}
 
-TECH_SIGNALS = [
-    "python", "java", "swift", "react", "javascript",
-    "sql", "aws", "docker", "api", "git", "node",
-    "frontend", "backend", "ios", "android"
-]
 
-NON_RESUME_SIGNALS = [
-    "boarding pass",
-    "flight",
+NON_RESUME_KEYWORDS = {
+
     "invoice",
     "receipt",
+    "boarding pass",
     "ticket",
-    "payment",
-    "bank statement",
-]
+    "payment receipt",
+    "bank statement"
+}
+
+
+MIN_WORD_COUNT = 120
 
 
 def is_valid_resume(text: str) -> bool:
 
-    text = normalize_text(text)
-
-    if len(text) < 150:
+    if not text:
         return False
 
-    resume_score = sum(signal in text for signal in RESUME_SIGNALS)
-    tech_score = sum(signal in text for signal in TECH_SIGNALS)
-    non_resume_score = sum(signal in text for signal in NON_RESUME_SIGNALS)
+    text_lower = normalize_text(text)
 
-    return (
-        resume_score >= 2
-        and tech_score >= 1
-        and non_resume_score == 0
+    words = text_lower.split()
+
+    # Minimum length check
+    if len(words) < MIN_WORD_COUNT:
+        return False
+
+
+    # Must contain resume sections
+    has_section = any(
+        keyword in text_lower
+        for keyword in RESUME_SECTION_KEYWORDS
     )
+
+    if not has_section:
+        return False
+
+
+    # Must contain tech keywords
+    tech_matches = sum(
+        keyword in text_lower
+        for keyword in TECH_KEYWORDS
+    )
+
+    if tech_matches < 2:
+        return False
+
+
+    # Reject obvious non-resumes
+    non_resume_matches = sum(
+        keyword in text_lower
+        for keyword in NON_RESUME_KEYWORDS
+    )
+
+    if non_resume_matches >= 2:
+        return False
+
+
+    # Must contain core resume sections (important for fresh grads)
+    core_sections = [
+
+        "education",
+        "projects",
+        "experience",
+        "internship"
+    ]
+
+    has_core = any(
+        section in text_lower
+        for section in core_sections
+    )
+
+    if not has_core:
+        return False
+
+
+    return True
 
 
 # =====================================================
@@ -129,7 +212,7 @@ async def extract_resume_text(file: UploadFile) -> str:
         raise HTTPException(400, "Empty file")
 
     if len(content) > MAX_FILE_SIZE:
-        raise HTTPException(400, "Resume too large (max 5MB)")
+        raise HTTPException(400, "Resume too large")
 
     try:
 
@@ -151,10 +234,13 @@ async def extract_resume_text(file: UploadFile) -> str:
         raise
 
     except Exception as e:
+
         logging.error(f"PDF extraction failed: {e}")
+
         raise HTTPException(400, "Invalid PDF file")
 
     if not is_valid_resume(text):
+
         raise HTTPException(
             400,
             "This document does not appear to be a software engineering resume"
@@ -218,10 +304,9 @@ async def jobs_from_resume(
             resume_text=text
         )
 
-        # fallback protection
         if not jobs:
 
-            logging.warning("Primary query returned no jobs. Using fallback.")
+            logging.warning("Fallback job query used")
 
             jobs = fetch_jobs(
                 query="junior software engineer",
@@ -239,7 +324,7 @@ async def jobs_from_resume(
 
 
 # =====================================================
-# RESUME OPTIMIZATION (JSON)
+# RESUME OPTIMIZATION
 # =====================================================
 
 @app.post("/resume/optimize")
@@ -252,46 +337,19 @@ async def optimize_resume(request: OptimizeRequest):
             request.job_description
         )
 
-        # -----------------------------
-        # Extract improved bullets
-        # -----------------------------
         improved_bullets = []
 
-        experience = result.get("experience", [])
+        for job in result.get("experience", []):
 
-        if isinstance(experience, list):
-            for job in experience:
-                bullets = job.get("bullets", [])
-                if isinstance(bullets, list):
-                    improved_bullets.extend(bullets)
+            improved_bullets.extend(job.get("bullets", []))
 
-        improved_bullets = improved_bullets[:5]
-
-        # -----------------------------
-        # ATS Keywords (flat list version)
-        # -----------------------------
-        ats_keywords = result.get("skills", [])
-
-        if not isinstance(ats_keywords, list):
-            ats_keywords = []
-
-        ats_keywords = ats_keywords[:10]
-
-        # -----------------------------
-        # Missing skills safety
-        # -----------------------------
-        missing_skills = result.get("missing_skills", [])
-
-        if not isinstance(missing_skills, list):
-            missing_skills = []
-
-        # -----------------------------
-        # FINAL RESPONSE
-        # -----------------------------
         return {
-            "missing_skills": missing_skills,
-            "improved_bullets": improved_bullets,
-            "ats_keywords": ats_keywords
+
+            "missing_skills": result.get("missing_skills", [])[:10],
+
+            "improved_bullets": improved_bullets[:5],
+
+            "ats_keywords": result.get("skills", [])[:10]
         }
 
     except Exception as e:
@@ -302,8 +360,6 @@ async def optimize_resume(request: OptimizeRequest):
             status_code=500,
             detail="Resume optimization failed"
         )
-
-
 
 
 # =====================================================
@@ -339,7 +395,6 @@ async def download_resume(
 
             "summary": optimized.get("summary", ""),
 
-            # ✅ revert back to LIST default
             "skills": optimized.get("skills", []),
 
             "experience": optimized.get("experience", []),
