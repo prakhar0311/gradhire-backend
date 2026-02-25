@@ -177,20 +177,27 @@ def compute_match_score(resume_text: str, job_text: str):
     job_words = tokenize(job_text)
 
     if not resume_words or not job_words:
-        return 40
+        return 50
 
     overlap = resume_words.intersection(job_words)
 
     tech_overlap = overlap.intersection(TECH_KEYWORDS)
 
-    base_score = len(overlap) * 2
-    tech_bonus = len(tech_overlap) * 6
+    # weighted overlap score
+    base_score = len(overlap)
+    tech_bonus = len(tech_overlap) * 2
 
-    score = base_score + tech_bonus
+    raw_score = base_score + tech_bonus
 
-    score = max(40, min(100, score))
+    # normalize relative to job size
+    max_possible = max(len(job_words), 20)
 
-    return int(score)
+    normalized = (raw_score / max_possible) * 100
+
+    # clamp properly
+    score = int(max(25, min(normalized, 95)))
+
+    return score
 
 
 # =====================================================
