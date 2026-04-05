@@ -243,7 +243,7 @@ async def extract_resume_text(file: UploadFile) -> str:
 
         raise HTTPException(
             400,
-            "This document does not appear to be a software engineering resume"
+            "This document does not appear to be a resume"
         )
 
     return text
