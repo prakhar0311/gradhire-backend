@@ -375,7 +375,25 @@ async def download_resume(
     if not job_description.strip():
         raise HTTPException(400, "Missing job description")
 
-    resume_text = await extract_resume_text(file)
+    content = await file.read()
+
+    if not content:
+        raise HTTPException(400, "Empty file")
+
+    try:
+        text = ""
+        with pdfplumber.open(io.BytesIO(content)) as pdf:
+            for page in pdf.pages:
+                extracted = page.extract_text()
+                if extracted:
+                    text += extracted + "\n"
+        resume_text = text.strip()
+    except Exception as e:
+        logging.error(f"PDF extraction failed: {e}")
+        raise HTTPException(400, "Could not read the PDF file")
+
+    if not resume_text:
+        raise HTTPException(400, "Could not extract text from PDF")
 
     try:
 
@@ -385,22 +403,12 @@ async def download_resume(
         )
 
         resume_data = {
-
             "name": optimized.get("name", "Candidate Name"),
-
-            "contact": optimized.get(
-                "contact",
-                "Email • Phone • LinkedIn"
-            ),
-
+            "contact": optimized.get("contact", "Email • Phone • LinkedIn"),
             "summary": optimized.get("summary", ""),
-
             "skills": optimized.get("skills", []),
-
             "experience": optimized.get("experience", []),
-
             "projects": optimized.get("projects", []),
-
             "education": optimized.get("education", [])
         }
 
