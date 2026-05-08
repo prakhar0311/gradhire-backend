@@ -25,6 +25,7 @@ from app.services.ai_optimizer import optimize_resume_ai
 from app.services.jobs import fetch_jobs
 from app.services.domain_classifier import generate_job_query
 from app.services.resume_builder import build_resume_pdf
+from fastapi.middleware.cors import CORSMiddleware
 
 
 # =====================================================
@@ -35,6 +36,15 @@ app = FastAPI(
     title="GradHire API",
     description="AI-powered resume optimization and job matching backend",
     version="1.0.0"
+)
+
+# CORS CONFIG
+app.add_middleware(
+    CORSMiddleware,
+    allow_origin_regex=r"https://.*\.lovable\.app",
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 MAX_FILE_SIZE = 5 * 1024 * 1024
