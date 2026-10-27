@@ -22,7 +22,12 @@ import re
 import logging
 
 from app.services.ai_optimizer import optimize_resume_ai
-from app.services.jobs import fetch_jobs
+from app.services.jobs import (
+    fetch_jobs,
+    fetch_new_grad_jobs,
+    close_client,
+    AdzunaUnavailable
+)
 from app.services.domain_classifier import generate_job_query
 from app.services.resume_builder import build_resume_pdf
 from fastapi.middleware.cors import CORSMiddleware
@@ -46,6 +51,11 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+@app.on_event("shutdown")
+async def shutdown():
+    await close_client()
+
 
 MAX_FILE_SIZE = 5 * 1024 * 1024
 ALLOWED_COUNTRIES = {"in", "us"}
@@ -304,33 +314,52 @@ async def jobs_from_resume(
 
     text = await extract_resume_text(file)
 
+    query = generate_job_query(text)
+
     try:
 
-        query = generate_job_query(text)
-
-        jobs = fetch_jobs(
+        # fetch_jobs already falls back to generic entry-level queries
+        jobs = await fetch_jobs(
             query=query,
             country=country,
             resume_text=text
         )
 
-        if not jobs:
+        return jobs
 
-            logging.warning("Fallback job query used")
+    except AdzunaUnavailable:
 
-            jobs = fetch_jobs(
-                query="junior software engineer",
-                country=country,
-                resume_text=text
-            )
-
-        return jobs or []
+        raise HTTPException(503, "Job search is temporarily unavailable. Please try again.")
 
     except Exception as e:
 
         logging.error(f"Job fetch failed: {e}")
 
-        return []
+        raise HTTPException(500, "Could not load jobs. Please try again.")
+
+
+@app.get("/jobs/new-grad")
+async def new_grad_jobs(
+    country: str = Query("in"),
+    page: int = Query(1, ge=1, le=50)
+):
+
+    if country not in ALLOWED_COUNTRIES:
+        raise HTTPException(400, "Unsupported country")
+
+    try:
+
+        return await fetch_new_grad_jobs(country=country, page=page)
+
+    except AdzunaUnavailable:
+
+        raise HTTPException(503, "Job search is temporarily unavailable. Please try again.")
+
+    except Exception as e:
+
+        logging.error(f"New grad fetch failed: {e}")
+
+        raise HTTPException(500, "Could not load jobs. Please try again.")
 
 
 # =====================================================
