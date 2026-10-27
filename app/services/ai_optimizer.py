@@ -256,7 +256,7 @@ Job Description:
 
             parsed = safe_json_parse(content)
 
-            print("AI parsed result:", parsed)
+            # Never log the parsed resume: it contains the user's personal data
 
             if parsed:
                 return build_safe_response(parsed, resume_text)

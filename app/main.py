@@ -12,8 +12,9 @@ load_dotenv()
 # IMPORTS
 # =====================================================
 
-from fastapi import FastAPI, UploadFile, File, Query, HTTPException, Form
+from fastapi import FastAPI, UploadFile, File, Query, HTTPException, Form, Request, Depends
 from fastapi.responses import FileResponse
+from starlette.background import BackgroundTask
 from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field
 from typing import List, Optional
@@ -22,7 +23,9 @@ import pdfplumber
 import io
 import re
 import json
+import time
 import logging
+from collections import defaultdict, deque
 
 from app.services.ai_optimizer import optimize_resume_ai, resume_to_text
 from app.services.jobs import (
@@ -64,6 +67,93 @@ async def shutdown():
 MAX_FILE_SIZE = 5 * 1024 * 1024
 ALLOWED_COUNTRIES = {"in", "us"}
 ALLOWED_MAX_DAYS = {1, 3, 7, 30}
+
+
+# =====================================================
+# RATE LIMITING (in-memory; fine for a single instance)
+# =====================================================
+
+AI_PER_MINUTE = 5          # OpenAI calls per user per minute
+AI_PER_DAY = 30            # OpenAI calls per user per day
+AI_GLOBAL_PER_DAY = 500    # Hard cap on OpenAI calls per day across all users
+GENERAL_PER_MINUTE = 30    # Other endpoints, per user per minute
+
+MINUTE = 60
+DAY = 24 * 60 * 60
+
+
+class RateLimiter:
+
+    def __init__(self):
+        self._hits = defaultdict(deque)
+        self._calls = 0
+
+    def _prune(self, key, window, now):
+        hits = self._hits[key]
+        while hits and now - hits[0] >= window:
+            hits.popleft()
+        return hits
+
+    def check(self, rules):
+        """rules: [(key, limit, window, message)]. Records a hit only if every
+        rule passes; otherwise raises 429 with the first failing rule's message."""
+        now = time.monotonic()
+
+        for key, limit, window, message in rules:
+            if len(self._prune(key, window, now)) >= limit:
+                raise HTTPException(429, message)
+
+        for key, _, _, _ in rules:
+            self._hits[key].append(now)
+
+        self._calls += 1
+        if self._calls % 1000 == 0:
+            self._cleanup(now)
+
+    def _cleanup(self, now):
+        # Drop idle keys so memory doesn't grow with every IP ever seen
+        for key in list(self._hits):
+            if not self._hits[key] or now - self._hits[key][-1] >= DAY:
+                del self._hits[key]
+
+
+limiter = RateLimiter()
+
+
+def client_ip(request: Request) -> str:
+    # Render's proxy puts the real client first in X-Forwarded-For. It can be
+    # spoofed, which is why AI_GLOBAL_PER_DAY exists as a hard backstop.
+    forwarded = request.headers.get("x-forwarded-for")
+    if forwarded:
+        return forwarded.split(",")[0].strip()
+    return request.client.host if request.client else "unknown"
+
+
+def enforce_ai_limits(request: Request):
+    ip = client_ip(request)
+    limiter.check([
+        (f"ai-min:{ip}", AI_PER_MINUTE, MINUTE,
+         "Too many requests. Please wait a minute and try again."),
+        (f"ai-day:{ip}", AI_PER_DAY, DAY,
+         "You've reached today's limit for AI optimizations. Please try again tomorrow."),
+        ("ai-global-day", AI_GLOBAL_PER_DAY, DAY,
+         "AI optimization is busy right now. Please try again later."),
+    ])
+
+
+def enforce_general_limits(request: Request):
+    ip = client_ip(request)
+    limiter.check([
+        (f"general-min:{ip}", GENERAL_PER_MINUTE, MINUTE,
+         "Too many requests. Please wait a minute and try again."),
+    ])
+
+
+def remove_file(path: str):
+    try:
+        os.remove(path)
+    except OSError:
+        pass
 
 logging.basicConfig(level=logging.WARNING)
 
@@ -314,7 +404,7 @@ def root():
 # UPLOAD RESUME
 # =====================================================
 
-@app.post("/resume/upload")
+@app.post("/resume/upload", dependencies=[Depends(enforce_general_limits)])
 async def upload_resume(file: UploadFile = File(...)):
 
     text = await extract_resume_text(file)
@@ -330,7 +420,7 @@ async def upload_resume(file: UploadFile = File(...)):
 # JOB SEARCH
 # =====================================================
 
-@app.post("/jobs/from-resume")
+@app.post("/jobs/from-resume", dependencies=[Depends(enforce_general_limits)])
 async def jobs_from_resume(
     file: UploadFile = File(...),
     country: str = Query("in")
@@ -365,7 +455,7 @@ async def jobs_from_resume(
         raise HTTPException(500, "Could not load jobs. Please try again.")
 
 
-@app.get("/jobs/new-grad")
+@app.get("/jobs/new-grad", dependencies=[Depends(enforce_general_limits)])
 async def new_grad_jobs(
     country: str = Query("in"),
     page: int = Query(1, ge=1, le=50),
@@ -397,7 +487,7 @@ async def new_grad_jobs(
 # RESUME OPTIMIZATION
 # =====================================================
 
-@app.post("/resume/optimize")
+@app.post("/resume/optimize", dependencies=[Depends(enforce_ai_limits)])
 async def optimize_resume(request: OptimizeRequest):
 
     try:
@@ -445,7 +535,7 @@ async def optimize_resume(request: OptimizeRequest):
 # SCORE RESUMES (same logic as job matching)
 # =====================================================
 
-@app.post("/resume/score")
+@app.post("/resume/score", dependencies=[Depends(enforce_general_limits)])
 async def score_resumes(request: ScoreRequest):
 
     # compute_match_score is the exact function used when matching jobs,
@@ -462,8 +552,9 @@ async def score_resumes(request: ScoreRequest):
 # DOWNLOAD OPTIMIZED RESUME
 # =====================================================
 
-@app.post("/resume/download")
+@app.post("/resume/download", dependencies=[Depends(enforce_general_limits)])
 async def download_resume(
+    request: Request,
     file: UploadFile = File(...),
     job_description: str = Form(...),
     optimized_resume: Optional[str] = Form(None)
@@ -504,6 +595,12 @@ async def download_resume(
         except ValueError:
             logging.warning("Ignoring invalid optimized_resume payload")
 
+    # Only an older app (no optimized_resume) makes this endpoint call OpenAI
+    if provided is None:
+        enforce_ai_limits(request)
+
+    pdf_path = None
+
     try:
 
         if provided is not None:
@@ -519,13 +616,18 @@ async def download_resume(
 
         pdf_path = await run_in_threadpool(build_resume_pdf, resume_data)
 
+        # Delete the generated PDF as soon as it has been sent
         return FileResponse(
             pdf_path,
             media_type="application/pdf",
-            filename="optimized_resume.pdf"
+            filename="optimized_resume.pdf",
+            background=BackgroundTask(remove_file, pdf_path)
         )
 
     except Exception as e:
+
+        if pdf_path:
+            remove_file(pdf_path)
 
         logging.error(f"Resume generation failed: {e}")
 
