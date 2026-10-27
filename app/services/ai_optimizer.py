@@ -267,3 +267,45 @@ Job Description:
 
     # Final fallback
     return fallback_response(resume_text)
+
+
+# =====================================================
+# OPTIMIZED RESUME AS PLAIN TEXT (FOR SCORING)
+# =====================================================
+
+def resume_to_text(resume: dict) -> str:
+
+    # Flattens the structured resume so it can be scored by the same
+    # compute_match_score used for the original resume text.
+    lines = []
+
+    def add(*parts):
+        text = " ".join(str(p) for p in parts if isinstance(p, str) and p.strip())
+        if text:
+            lines.append(text)
+
+    add(resume.get("name", ""))
+    add(resume.get("contact", ""))
+    add(resume.get("summary", ""))
+
+    skills = [s for s in resume.get("skills", []) if isinstance(s, str)]
+    if skills:
+        lines.append("Skills: " + ", ".join(skills))
+
+    for job in resume.get("experience", []):
+        if isinstance(job, dict):
+            add(job.get("title", ""), job.get("company", ""), job.get("duration", ""), job.get("location", ""))
+            for bullet in job.get("bullets", []) or []:
+                add(bullet)
+
+    for project in resume.get("projects", []):
+        if isinstance(project, dict):
+            add(project.get("title", ""))
+            for bullet in project.get("bullets", []) or []:
+                add(bullet)
+
+    for school in resume.get("education", []):
+        if isinstance(school, dict):
+            add(school.get("degree", ""), school.get("school", ""), school.get("duration", ""), school.get("location", ""))
+
+    return "\n".join(lines)

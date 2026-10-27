@@ -14,16 +14,20 @@ load_dotenv()
 
 from fastapi import FastAPI, UploadFile, File, Query, HTTPException, Form
 from fastapi.responses import FileResponse
+from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field
+from typing import List, Optional
 
 import pdfplumber
 import io
 import re
+import json
 import logging
 
-from app.services.ai_optimizer import optimize_resume_ai
+from app.services.ai_optimizer import optimize_resume_ai, resume_to_text
 from app.services.jobs import (
     fetch_jobs,
+    compute_match_score,
     fetch_new_grad_jobs,
     close_client,
     AdzunaUnavailable
@@ -59,6 +63,7 @@ async def shutdown():
 
 MAX_FILE_SIZE = 5 * 1024 * 1024
 ALLOWED_COUNTRIES = {"in", "us"}
+ALLOWED_MAX_DAYS = {1, 3, 7, 30}
 
 logging.basicConfig(level=logging.WARNING)
 
@@ -70,6 +75,28 @@ logging.basicConfig(level=logging.WARNING)
 class OptimizeRequest(BaseModel):
     resume_text: str = Field(..., min_length=50)
     job_description: str = Field(..., min_length=20)
+
+
+class ScoreRequest(BaseModel):
+    job_description: str = Field(..., min_length=1)
+    resume_texts: List[str] = Field(..., min_length=1, max_length=4)
+
+
+# =====================================================
+# OPTIMIZED RESUME SHAPE (shared by optimize + download)
+# =====================================================
+
+def build_resume_data(optimized: dict) -> dict:
+
+    return {
+        "name": optimized.get("name", "Candidate Name"),
+        "contact": optimized.get("contact", "Email • Phone • LinkedIn"),
+        "summary": optimized.get("summary", ""),
+        "skills": optimized.get("skills", []),
+        "experience": optimized.get("experience", []),
+        "projects": optimized.get("projects", []),
+        "education": optimized.get("education", [])
+    }
 
 
 # =====================================================
@@ -341,15 +368,19 @@ async def jobs_from_resume(
 @app.get("/jobs/new-grad")
 async def new_grad_jobs(
     country: str = Query("in"),
-    page: int = Query(1, ge=1, le=50)
+    page: int = Query(1, ge=1, le=50),
+    max_days: Optional[int] = Query(None)
 ):
 
     if country not in ALLOWED_COUNTRIES:
         raise HTTPException(400, "Unsupported country")
 
+    if max_days is not None and max_days not in ALLOWED_MAX_DAYS:
+        raise HTTPException(400, "Unsupported max_days")
+
     try:
 
-        return await fetch_new_grad_jobs(country=country, page=page)
+        return await fetch_new_grad_jobs(country=country, page=page, max_days=max_days)
 
     except AdzunaUnavailable:
 
@@ -371,7 +402,9 @@ async def optimize_resume(request: OptimizeRequest):
 
     try:
 
-        result = optimize_resume_ai(
+        # OpenAI's client is synchronous; keep it off the event loop
+        result = await run_in_threadpool(
+            optimize_resume_ai,
             request.resume_text,
             request.job_description
         )
@@ -382,13 +415,20 @@ async def optimize_resume(request: OptimizeRequest):
 
             improved_bullets.extend(job.get("bullets", []))
 
+        optimized_resume = build_resume_data(result)
+
         return {
 
             "missing_skills": result.get("missing_skills", [])[:10],
 
             "improved_bullets": improved_bullets[:5],
 
-            "ats_keywords": result.get("skills", [])[:10]
+            "ats_keywords": result.get("skills", [])[:10],
+
+            # The exact resume shown/scored/downloaded by the app
+            "optimized_resume": optimized_resume,
+
+            "optimized_resume_text": resume_to_text(optimized_resume)
         }
 
     except Exception as e:
@@ -402,13 +442,31 @@ async def optimize_resume(request: OptimizeRequest):
 
 
 # =====================================================
+# SCORE RESUMES (same logic as job matching)
+# =====================================================
+
+@app.post("/resume/score")
+async def score_resumes(request: ScoreRequest):
+
+    # compute_match_score is the exact function used when matching jobs,
+    # so "before" and "after" are scored identically.
+    return {
+        "scores": [
+            compute_match_score(text, request.job_description)
+            for text in request.resume_texts
+        ]
+    }
+
+
+# =====================================================
 # DOWNLOAD OPTIMIZED RESUME
 # =====================================================
 
 @app.post("/resume/download")
 async def download_resume(
     file: UploadFile = File(...),
-    job_description: str = Form(...)
+    job_description: str = Form(...),
+    optimized_resume: Optional[str] = Form(None)
 ):
 
     if not job_description.strip():
@@ -434,24 +492,32 @@ async def download_resume(
     if not resume_text:
         raise HTTPException(400, "Could not extract text from PDF")
 
+    # Prefer the resume the app already showed and scored; older app
+    # versions don't send it, so fall back to optimizing again.
+    provided = None
+
+    if optimized_resume:
+        try:
+            parsed = json.loads(optimized_resume)
+            if isinstance(parsed, dict):
+                provided = parsed
+        except ValueError:
+            logging.warning("Ignoring invalid optimized_resume payload")
+
     try:
 
-        optimized = optimize_resume_ai(
-            resume_text,
-            job_description
-        )
+        if provided is not None:
+            optimized = provided
+        else:
+            optimized = await run_in_threadpool(
+                optimize_resume_ai,
+                resume_text,
+                job_description
+            )
 
-        resume_data = {
-            "name": optimized.get("name", "Candidate Name"),
-            "contact": optimized.get("contact", "Email • Phone • LinkedIn"),
-            "summary": optimized.get("summary", ""),
-            "skills": optimized.get("skills", []),
-            "experience": optimized.get("experience", []),
-            "projects": optimized.get("projects", []),
-            "education": optimized.get("education", [])
-        }
+        resume_data = build_resume_data(optimized)
 
-        pdf_path = build_resume_pdf(resume_data)
+        pdf_path = await run_in_threadpool(build_resume_pdf, resume_data)
 
         return FileResponse(
             pdf_path,

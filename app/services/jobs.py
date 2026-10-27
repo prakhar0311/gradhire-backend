@@ -591,7 +591,11 @@ async def load_new_grad_feed(country: str) -> List[dict]:
     return feed
 
 
-async def fetch_new_grad_jobs(country: str = "in", page: int = 1) -> dict:
+async def fetch_new_grad_jobs(
+    country: str = "in",
+    page: int = 1,
+    max_days: Optional[int] = None
+) -> dict:
 
     if not ADZUNA_APP_ID or not ADZUNA_API_KEY:
         logging.error("Missing Adzuna API keys")
@@ -599,11 +603,17 @@ async def fetch_new_grad_jobs(country: str = "in", page: int = 1) -> dict:
 
     feed = await load_new_grad_feed(country)
 
+    # Date filter runs on the cached feed, so it costs no extra Adzuna calls
+    if max_days is not None:
+        cutoff = time.time() - max_days * 24 * 60 * 60
+        feed = [job for job in feed if posted_timestamp(job) >= cutoff]
+
     start = (page - 1) * NEW_GRAD_PAGE_SIZE
     end = start + NEW_GRAD_PAGE_SIZE
 
     return {
         "jobs": feed[start:end],
         "page": page,
-        "hasMore": end < len(feed)
+        "hasMore": end < len(feed),
+        "total": len(feed)
     }
