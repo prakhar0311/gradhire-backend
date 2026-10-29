@@ -38,6 +38,7 @@ from app.services.jobs import (
 from app.services.domain_classifier import generate_job_query
 from app.services.resume_builder import build_resume_pdf
 from app.services.supabase_client import check_connection
+from app.services.account import delete_account, AccountError
 from fastapi.middleware.cors import CORSMiddleware
 
 
@@ -166,6 +167,11 @@ logging.basicConfig(level=logging.WARNING)
 class OptimizeRequest(BaseModel):
     resume_text: str = Field(..., min_length=50)
     job_description: str = Field(..., min_length=20)
+
+
+class DeleteAccountRequest(BaseModel):
+    # Fresh Sign in with Apple authorization code, used to revoke Apple tokens
+    apple_authorization_code: Optional[str] = Field(None, max_length=2048)
 
 
 class ScoreRequest(BaseModel):
@@ -415,6 +421,30 @@ async def supabase_health():
         raise HTTPException(503, f"Supabase: {result['reason']}")
 
     return {"supabase": "ok", "jobs_table": "reachable"}
+
+
+# =====================================================
+# DELETE ACCOUNT
+# =====================================================
+
+@app.delete("/account", dependencies=[Depends(enforce_general_limits)])
+async def delete_account_endpoint(
+    request: Request,
+    body: Optional[DeleteAccountRequest] = None
+):
+
+    auth_header = request.headers.get("authorization", "")
+
+    if not auth_header.lower().startswith("bearer ") or len(auth_header) < 20:
+        raise HTTPException(401, "Please sign in to delete your account.")
+
+    access_token = auth_header[7:].strip()
+    apple_code = body.apple_authorization_code if body else None
+
+    try:
+        return await run_in_threadpool(delete_account, access_token, apple_code)
+    except AccountError as e:
+        raise HTTPException(e.status_code, e.message)
 
 
 # =====================================================
