@@ -37,6 +37,7 @@ from app.services.jobs import (
 )
 from app.services.domain_classifier import generate_job_query
 from app.services.resume_builder import build_resume_pdf
+from app.services.supabase_client import check_connection
 from fastapi.middleware.cors import CORSMiddleware
 
 
@@ -398,6 +399,22 @@ def root():
         "service": "GradHire backend",
         "version": "1.0"
     }
+
+
+# =====================================================
+# SUPABASE HEALTH CHECK
+# =====================================================
+
+@app.get("/health/supabase", dependencies=[Depends(enforce_general_limits)])
+async def supabase_health():
+
+    # The Supabase client is synchronous; keep it off the event loop
+    result = await run_in_threadpool(check_connection)
+
+    if not result["ok"]:
+        raise HTTPException(503, f"Supabase: {result['reason']}")
+
+    return {"supabase": "ok", "jobs_table": "reachable"}
 
 
 # =====================================================
