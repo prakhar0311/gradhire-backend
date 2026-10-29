@@ -40,6 +40,7 @@ from app.services.resume_builder import build_resume_pdf
 from app.services.supabase_client import check_connection
 from app.services.account import delete_account, verify_user, AccountError
 from app.services.job_store import save_served_jobs, ensure_job, JobStoreError
+from app.services.match_store import save_matches
 from fastapi.middleware.cors import CORSMiddleware
 
 
@@ -504,9 +505,13 @@ async def upload_resume(file: UploadFile = File(...)):
 
 @app.post("/jobs/from-resume", dependencies=[Depends(enforce_general_limits)])
 async def jobs_from_resume(
+    request: Request,
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
-    country: str = Query("in")
+    country: str = Query("in"),
+    # Set by signed-in users whose resume is saved to their account; the
+    # matches are then stored for the dashboard
+    resume_id: Optional[str] = Form(None, max_length=36)
 ):
 
     if country not in ALLOWED_COUNTRIES:
@@ -525,8 +530,13 @@ async def jobs_from_resume(
             resume_text=text
         )
 
-        # Keep the shared jobs table in step with what users can track
-        background_tasks.add_task(save_served_jobs, jobs)
+        # Keep the shared jobs table in step with what users can track, and
+        # store the matches when the resume is saved to the user's account
+        auth_header = request.headers.get("authorization", "")
+        if resume_id and auth_header.lower().startswith("bearer "):
+            background_tasks.add_task(save_matches, auth_header[7:].strip(), resume_id, jobs)
+        else:
+            background_tasks.add_task(save_served_jobs, jobs)
 
         return jobs
 
@@ -536,7 +546,7 @@ async def jobs_from_resume(
 
     except Exception as e:
 
-        logging.error(f"Job fetch failed: {e}")
+        logging.error(f"Job fetch failed: {type(e).__name__}")
 
         raise HTTPException(500, "Could not load jobs. Please try again.")
 
@@ -569,7 +579,7 @@ async def new_grad_jobs(
 
     except Exception as e:
 
-        logging.error(f"New grad fetch failed: {e}")
+        logging.error(f"New grad fetch failed: {type(e).__name__}")
 
         raise HTTPException(500, "Could not load jobs. Please try again.")
 

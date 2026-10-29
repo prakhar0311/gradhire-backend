@@ -11,6 +11,8 @@ from typing import Dict, List, Optional, Tuple
 import httpx
 from dotenv import load_dotenv
 
+from app.services.skills import extract_skills, skill_gap
+
 load_dotenv()
 
 ADZUNA_APP_ID = os.getenv("ADZUNA_APP_ID")
@@ -353,7 +355,14 @@ async def adzuna_search(
 
     except Exception as e:
 
-        logging.warning(f"Adzuna fetch failed ({params.get('what') or params.get('title_only')}): {e}")
+        # Never log the exception text: httpx errors include the request URL,
+        # which carries app_id and app_key
+        query = params.get('what') or params.get('title_only')
+        if isinstance(e, httpx.HTTPStatusError):
+            reason = f"HTTP {e.response.status_code}"
+        else:
+            reason = type(e).__name__
+        logging.warning(f"Adzuna fetch failed ({query}): {reason}")
 
         return None
 
@@ -490,6 +499,7 @@ async def fetch_jobs(
 
     collected_jobs = []
     seen_urls = set()
+    resume_skills = extract_skills(resume_text)
 
     # Batches keep query order, so the resume-specific query wins ties
     for results in batches:
@@ -514,7 +524,14 @@ async def fetch_jobs(
                 clean_description(description_raw)
             )
 
-            collected_jobs.append(build_job(job, score))
+            built = build_job(job, score)
+
+            # Skills the job asks for that the resume has / doesn't have
+            matched, missing = skill_gap(resume_skills, f"{title} {description_raw}")
+            built["matchedSkills"] = matched
+            built["missingSkills"] = missing
+
+            collected_jobs.append(built)
 
             seen_urls.add(redirect_url)
 
