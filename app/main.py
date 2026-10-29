@@ -12,7 +12,7 @@ load_dotenv()
 # IMPORTS
 # =====================================================
 
-from fastapi import FastAPI, UploadFile, File, Query, HTTPException, Form, Request, Depends
+from fastapi import FastAPI, UploadFile, File, Query, HTTPException, Form, Request, Depends, BackgroundTasks
 from fastapi.responses import FileResponse
 from starlette.background import BackgroundTask
 from fastapi.concurrency import run_in_threadpool
@@ -38,7 +38,8 @@ from app.services.jobs import (
 from app.services.domain_classifier import generate_job_query
 from app.services.resume_builder import build_resume_pdf
 from app.services.supabase_client import check_connection
-from app.services.account import delete_account, AccountError
+from app.services.account import delete_account, verify_user, AccountError
+from app.services.job_store import save_served_jobs, ensure_job, JobStoreError
 from fastapi.middleware.cors import CORSMiddleware
 
 
@@ -172,6 +173,17 @@ class OptimizeRequest(BaseModel):
 class DeleteAccountRequest(BaseModel):
     # Fresh Sign in with Apple authorization code, used to revoke Apple tokens
     apple_authorization_code: Optional[str] = Field(None, max_length=2048)
+
+
+class EnsureJobRequest(BaseModel):
+    # The job as the app received it from /jobs/*; the id must match the URL
+    id: str = Field(..., min_length=36, max_length=36)
+    title: str = Field(..., min_length=1, max_length=1000)
+    company: Optional[str] = Field(None, max_length=1000)
+    location: Optional[str] = Field(None, max_length=1000)
+    description: Optional[str] = Field(None, max_length=50000)
+    applyURL: str = Field(..., min_length=10, max_length=2048)
+    postedAt: Optional[str] = Field(None, max_length=64)
 
 
 class ScoreRequest(BaseModel):
@@ -448,6 +460,29 @@ async def delete_account_endpoint(
 
 
 # =====================================================
+# ENSURE A JOB EXISTS (before the app tracks it)
+# =====================================================
+# The app saves applications straight to Supabase; this is only called when
+# that fails because the job isn't in the shared jobs table yet.
+
+@app.post("/jobs/ensure", dependencies=[Depends(enforce_general_limits)])
+async def ensure_job_endpoint(request: Request, body: EnsureJobRequest):
+
+    auth_header = request.headers.get("authorization", "")
+
+    if not auth_header.lower().startswith("bearer ") or len(auth_header) < 20:
+        raise HTTPException(401, "Please sign in to track jobs.")
+
+    try:
+        await run_in_threadpool(verify_user, auth_header[7:].strip())
+        return await run_in_threadpool(ensure_job, body.model_dump())
+    except AccountError as e:
+        raise HTTPException(e.status_code, e.message)
+    except JobStoreError as e:
+        raise HTTPException(e.status_code, e.message)
+
+
+# =====================================================
 # UPLOAD RESUME
 # =====================================================
 
@@ -469,6 +504,7 @@ async def upload_resume(file: UploadFile = File(...)):
 
 @app.post("/jobs/from-resume", dependencies=[Depends(enforce_general_limits)])
 async def jobs_from_resume(
+    background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     country: str = Query("in")
 ):
@@ -489,6 +525,9 @@ async def jobs_from_resume(
             resume_text=text
         )
 
+        # Keep the shared jobs table in step with what users can track
+        background_tasks.add_task(save_served_jobs, jobs)
+
         return jobs
 
     except AdzunaUnavailable:
@@ -504,6 +543,7 @@ async def jobs_from_resume(
 
 @app.get("/jobs/new-grad", dependencies=[Depends(enforce_general_limits)])
 async def new_grad_jobs(
+    background_tasks: BackgroundTasks,
     country: str = Query("in"),
     page: int = Query(1, ge=1, le=50),
     max_days: Optional[int] = Query(None)
@@ -517,7 +557,11 @@ async def new_grad_jobs(
 
     try:
 
-        return await fetch_new_grad_jobs(country=country, page=page, max_days=max_days)
+        result = await fetch_new_grad_jobs(country=country, page=page, max_days=max_days)
+
+        background_tasks.add_task(save_served_jobs, result["jobs"], True)
+
+        return result
 
     except AdzunaUnavailable:
 
