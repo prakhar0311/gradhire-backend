@@ -5,6 +5,7 @@ import uuid
 import asyncio
 import hashlib
 import logging
+from collections import OrderedDict
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 
@@ -34,6 +35,15 @@ MATCH_MAX_DAYS_OLD = 180
 MATCH_CACHE_TTL = 30 * 60
 NEW_GRAD_CACHE_TTL = 30 * 60
 NEW_GRAD_PAGE_SIZE = 20
+
+# Search: Adzuna pages are fetched lazily as the client scrolls
+SEARCH_CACHE_TTL = 5 * 60
+SEARCH_CACHE_MAX_ENTRIES = 200
+SEARCH_ADZUNA_PAGE_SIZE = 50
+SEARCH_MAX_ADZUNA_PAGES = 5
+SEARCH_QUERY_MIN_LENGTH = 2
+SEARCH_QUERY_MAX_LENGTH = 100
+SEARCH_RETRY_IF_FASTER_THAN = 3.0
 
 # Stable UUIDs derived from Adzuna's job id, so bookmarks survive refetches.
 JOB_ID_NAMESPACE = uuid.UUID("6f1c2a52-8d3e-4b7a-9c41-2f5e0d8b7a10")
@@ -357,7 +367,8 @@ async def adzuna_search(
 
         # Never log the exception text: httpx errors include the request URL,
         # which carries app_id and app_key
-        query = params.get('what') or params.get('title_only')
+        # Only our own feed keywords are logged; search text comes from users
+        query = params.get('title_only') or 'search'
         if isinstance(e, httpx.HTTPStatusError):
             reason = f"HTTP {e.response.status_code}"
         else:
@@ -633,4 +644,172 @@ async def fetch_new_grad_jobs(
         "page": page,
         "hasMore": end < len(feed),
         "total": len(feed)
+    }
+
+
+# =====================================================
+# SEARCH (ALL JOBS)
+# =====================================================
+
+_SEARCH_DISALLOWED = re.compile(r"[^\w\s+#./-]")
+
+
+def clean_search_query(raw: str) -> Optional[str]:
+
+    # Letters, digits, spaces and + # . - / only (keeps "C++", "C#", "Node.js").
+    # Returns None when too little is left to search for.
+    text = _SEARCH_DISALLOWED.sub(" ", raw or "").replace("_", " ")
+    text = " ".join(text.split())[:SEARCH_QUERY_MAX_LENGTH].strip()
+
+    if len(text) < SEARCH_QUERY_MIN_LENGTH:
+        return None
+
+    return text
+
+
+class _SearchState:
+
+    def __init__(self):
+        self.jobs: List[dict] = []
+        self.seen_ids = set()
+        self.seen_postings = set()
+        self.next_page = 1
+        self.exhausted = False
+        self.expires_at = time.time() + SEARCH_CACHE_TTL
+        self.lock = asyncio.Lock()
+
+
+_searches: "OrderedDict[str, _SearchState]" = OrderedDict()
+
+
+def _search_state(key: str) -> _SearchState:
+
+    state = _searches.get(key)
+
+    if state is None or time.time() >= state.expires_at:
+        state = _SearchState()
+        _searches[key] = state
+
+    _searches.move_to_end(key)
+
+    while len(_searches) > SEARCH_CACHE_MAX_ENTRIES:
+        _searches.popitem(last=False)
+
+    return state
+
+
+async def _fetch_next_search_page(country: str, query: str, max_days: int, state: _SearchState) -> bool:
+
+    # Returns False when Adzuna failed (the state is left as it was)
+    # Adzuna's default (relevance) order: sorting by date buries title matches
+    params = {
+        "what": query,
+        "max_days_old": max_days,
+        "results_per_page": SEARCH_ADZUNA_PAGE_SIZE
+    }
+
+    results = None
+
+    # Adzuna sometimes answers with a quick 503; a fast failure gets one retry
+    for attempt in range(2):
+        started = time.monotonic()
+        try:
+            results = await asyncio.wait_for(
+                adzuna_search(country, params, page=state.next_page),
+                timeout=OVERALL_TIMEOUT
+            )
+        except asyncio.TimeoutError:
+            logging.warning("Adzuna search timed out")
+            break
+        if results is not None or time.monotonic() - started > SEARCH_RETRY_IF_FASTER_THAN:
+            break
+        await asyncio.sleep(0.4)
+
+    if results is None:
+        return False
+
+    words = query.lower().split()
+    batch = []
+
+    for job in results:
+
+        if not job.get("redirect_url"):
+            continue
+
+        # Same new-grad rules as resume matching: no senior titles, <=2 years
+        if not is_entry_level(job.get("title", ""), job.get("description", "")):
+            continue
+
+        built = build_job(job, None)
+
+        # The same opening is often posted many times under different ids
+        posting = (built["title"].lower(), built["company"].lower(), built["location"].lower())
+
+        if built["id"] in state.seen_ids or posting in state.seen_postings:
+            continue
+
+        state.seen_ids.add(built["id"])
+        state.seen_postings.add(posting)
+        batch.append(built)
+
+    # Within each batch: title matches first, then company matches, newest first
+    def rank(job: dict):
+        title = job["title"].lower()
+        company = job["company"].lower()
+        if all(word in title for word in words):
+            tier = 0
+        elif all(word in company for word in words):
+            tier = 1
+        elif any(word in title for word in words):
+            tier = 2
+        else:
+            tier = 3
+        return (tier, -posted_timestamp(job))
+
+    state.jobs.extend(sorted(batch, key=rank))
+    state.next_page += 1
+
+    if len(results) < SEARCH_ADZUNA_PAGE_SIZE or state.next_page > SEARCH_MAX_ADZUNA_PAGES:
+        state.exhausted = True
+
+    return True
+
+
+async def search_new_grad_jobs(
+    query: str,
+    country: str = "in",
+    page: int = 1,
+    max_days: Optional[int] = None
+) -> dict:
+
+    if not ADZUNA_APP_ID or not ADZUNA_API_KEY:
+        logging.error("Missing Adzuna API keys")
+        raise AdzunaUnavailable()
+
+    days = max_days or MAX_DAYS_OLD
+    state = _search_state(f"{country}:{days}:{query.lower()}")
+
+    start = (page - 1) * NEW_GRAD_PAGE_SIZE
+    end = start + NEW_GRAD_PAGE_SIZE
+    failed = False
+
+    async with state.lock:
+        # One job past this page tells us whether another page exists
+        while len(state.jobs) <= end and not state.exhausted:
+            if not await _fetch_next_search_page(country, query, days, state):
+                failed = True
+                break
+
+    page_jobs = state.jobs[start:end]
+
+    if failed and not page_jobs:
+        raise AdzunaUnavailable()
+
+    return {
+        "jobs": page_jobs,
+        "page": page,
+        # After a failed fetch, let the client try the next page again
+        "hasMore": len(state.jobs) > end or (failed and not state.exhausted),
+        "total": len(state.jobs),
+        "totalIsExact": state.exhausted
     }

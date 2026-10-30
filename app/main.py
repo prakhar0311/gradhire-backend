@@ -32,6 +32,9 @@ from app.services.jobs import (
     fetch_jobs,
     compute_match_score,
     fetch_new_grad_jobs,
+    search_new_grad_jobs,
+    clean_search_query,
+    SEARCH_QUERY_MAX_LENGTH,
     close_client,
     AdzunaUnavailable
 )
@@ -556,7 +559,8 @@ async def new_grad_jobs(
     background_tasks: BackgroundTasks,
     country: str = Query("in"),
     page: int = Query(1, ge=1, le=50),
-    max_days: Optional[int] = Query(None)
+    max_days: Optional[int] = Query(None),
+    q: Optional[str] = Query(None, max_length=SEARCH_QUERY_MAX_LENGTH)
 ):
 
     if country not in ALLOWED_COUNTRIES:
@@ -565,9 +569,19 @@ async def new_grad_jobs(
     if max_days is not None and max_days not in ALLOWED_MAX_DAYS:
         raise HTTPException(400, "Unsupported max_days")
 
+    query = None
+
+    if q is not None:
+        query = clean_search_query(q)
+        if query is None:
+            raise HTTPException(422, "Search needs at least 2 letters or numbers")
+
     try:
 
-        result = await fetch_new_grad_jobs(country=country, page=page, max_days=max_days)
+        if query:
+            result = await search_new_grad_jobs(query=query, country=country, page=page, max_days=max_days)
+        else:
+            result = await fetch_new_grad_jobs(country=country, page=page, max_days=max_days)
 
         background_tasks.add_task(save_served_jobs, result["jobs"], True)
 
