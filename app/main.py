@@ -43,7 +43,7 @@ from app.services.resume_builder import build_resume_pdf
 from app.services.supabase_client import check_connection
 from app.services.account import delete_account, verify_user, AccountError
 from app.services.job_store import save_served_jobs, ensure_job, JobStoreError
-from app.services.match_store import save_matches
+from app.services.match_store import save_matches, load_resume_for_matching, MatchStoreError
 from fastapi.middleware.cors import CORSMiddleware
 
 
@@ -172,6 +172,11 @@ logging.basicConfig(level=logging.WARNING)
 class OptimizeRequest(BaseModel):
     resume_text: str = Field(..., min_length=50)
     job_description: str = Field(..., min_length=20)
+
+
+class ResumeMatchRequest(BaseModel):
+    resume_id: str = Field(..., max_length=36)
+    country: str = Field("in", max_length=4)
 
 
 class DeleteAccountRequest(BaseModel):
@@ -550,6 +555,70 @@ async def jobs_from_resume(
     except Exception as e:
 
         logging.error(f"Job fetch failed: {type(e).__name__}")
+
+        raise HTTPException(500, "Could not load jobs. Please try again.")
+
+
+# Matches for a resume saved to the user's account, using its stored text
+# (no PDF upload). Jobs scored before keep their stored score.
+@app.post("/jobs/for-resume", dependencies=[Depends(enforce_general_limits)])
+async def jobs_for_resume(
+    request: Request,
+    body: ResumeMatchRequest,
+    background_tasks: BackgroundTasks
+):
+
+    if body.country not in ALLOWED_COUNTRIES:
+        raise HTTPException(400, "Unsupported country")
+
+    auth_header = request.headers.get("authorization", "")
+
+    if not auth_header.lower().startswith("bearer ") or len(auth_header) < 20:
+        raise HTTPException(401, "Please sign in to see your matches.")
+
+    access_token = auth_header[7:].strip()
+
+    try:
+        user = await run_in_threadpool(verify_user, access_token)
+        text, stored = await run_in_threadpool(load_resume_for_matching, user.id, body.resume_id)
+    except AccountError as e:
+        raise HTTPException(e.status_code, e.message)
+    except MatchStoreError as e:
+        raise HTTPException(e.status_code, e.message)
+    except Exception as e:
+        logging.error(f"Loading resume for matching failed: {type(e).__name__}")
+        raise HTTPException(500, "Could not load your matches. Please try again.")
+
+    try:
+
+        fetched = await fetch_jobs(
+            query=generate_job_query(text),
+            country=body.country,
+            resume_text=text
+        )
+
+        # Copies: fetch_jobs results are cached and shared between requests
+        jobs = []
+        for job in fetched:
+            job = dict(job)
+            previous = stored.get(job.get("id"))
+            if previous:
+                job["matchScore"] = previous["match_score"]
+                job["matchedSkills"] = previous.get("matched_skills") or job.get("matchedSkills") or []
+                job["missingSkills"] = previous.get("missing_skills") or job.get("missingSkills") or []
+            jobs.append(job)
+
+        background_tasks.add_task(save_matches, access_token, body.resume_id, jobs)
+
+        return jobs
+
+    except AdzunaUnavailable:
+
+        raise HTTPException(503, "Job search is temporarily unavailable. Please try again.")
+
+    except Exception as e:
+
+        logging.error(f"Resume match failed: {type(e).__name__}")
 
         raise HTTPException(500, "Could not load jobs. Please try again.")
 
