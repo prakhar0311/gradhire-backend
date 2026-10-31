@@ -438,9 +438,23 @@ async def extract_resume_text(file: UploadFile) -> str:
 
     except Exception as e:
 
-        logging.error(f"PDF extraction failed: {e}")
+        logging.error(f"PDF extraction failed: {type(e).__name__}")
+
+        # pdfplumber wraps pdfminer's PDFPasswordIncorrect / PDFEncryptionError
+        causes = [e, e.__cause__] + [a for a in getattr(e, "args", ()) if isinstance(a, BaseException)]
+        names = " ".join(type(c).__name__ for c in causes if c is not None).lower()
+        if "password" in names or "encrypt" in names:
+            raise HTTPException(400, "This PDF is password-protected. Remove the password and upload it again.")
 
         raise HTTPException(400, "Invalid PDF file")
+
+    # Almost no text: a scanned image or a photo of a resume
+    if len(text.split()) < 15:
+        raise HTTPException(
+            400,
+            "This PDF looks like a scanned image, so its text can't be read. "
+            "Export your resume as a text-based PDF (for example from Word or Google Docs) and try again."
+        )
 
     if not is_valid_resume(text):
 
