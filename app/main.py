@@ -44,6 +44,7 @@ from app.services.supabase_client import check_connection
 from app.services.account import delete_account, verify_user, AccountError
 from app.services.job_store import save_served_jobs, ensure_job, JobStoreError
 from app.services.match_store import save_matches, load_resume_for_matching, MatchStoreError
+from app.services import resume_analysis, analysis_store
 from fastapi.middleware.cors import CORSMiddleware
 
 
@@ -172,6 +173,14 @@ logging.basicConfig(level=logging.WARNING)
 class OptimizeRequest(BaseModel):
     resume_text: str = Field(..., min_length=50)
     job_description: str = Field(..., min_length=20)
+
+
+class AnalyzeRequest(BaseModel):
+    resume_text: str = Field(..., min_length=1, max_length=30000)
+    job_description: str = Field(..., min_length=1, max_length=20000)
+    # Signed-in users: the saved resume and the job, so the result is stored
+    resume_id: Optional[str] = Field(None, max_length=36)
+    job_id: Optional[str] = Field(None, max_length=36)
 
 
 class ResumeMatchRequest(BaseModel):
@@ -713,6 +722,95 @@ async def optimize_resume(request: OptimizeRequest):
             status_code=500,
             detail="Resume optimization failed"
         )
+
+
+# =====================================================
+# RESUME ANALYSIS + OPTIMIZATION (Optimize screen, v2)
+# =====================================================
+# Two steps so the app's progress is real: /resume/analysis (job keywords,
+# matched vs missing, the original's score) then /resume/optimize-v2
+# (rewritten bullets, the optimized resume and its score). Signed-in users'
+# results are stored per (resume, job) and reused while the text is the
+# same. /resume/optimize stays as it was for older app versions.
+
+def _account_context(request: Request, body: AnalyzeRequest):
+    """(user_id, resume_hash, job_hash) when the result can be stored, else None."""
+    auth_header = request.headers.get("authorization", "")
+    if not (body.resume_id and body.job_id and auth_header.lower().startswith("bearer ")):
+        return None
+    try:
+        user = verify_user(auth_header[7:].strip())
+    except AccountError:
+        return None
+    if not analysis_store.owns_resume(user.id, body.resume_id):
+        return None
+    return (
+        str(user.id),
+        resume_analysis.content_hash(body.resume_text.strip()),
+        resume_analysis.content_hash(body.job_description.strip()),
+    )
+
+
+def _analysis_error(e: Exception):
+    if isinstance(e, resume_analysis.AnalysisError):
+        return HTTPException(422, e.message)
+    logging.error(f"Resume analysis failed: {type(e).__name__}")
+    return HTTPException(500, "Resume analysis failed. Please try again.")
+
+
+@app.post("/resume/analysis", dependencies=[Depends(enforce_general_limits)])
+async def resume_analysis_endpoint(request: Request, body: AnalyzeRequest):
+
+    context = await run_in_threadpool(_account_context, request, body)
+
+    if context:
+        stored = await run_in_threadpool(
+            analysis_store.load, context[0], body.resume_id, body.job_id,
+            context[1], context[2], resume_analysis.ANALYSIS_VERSION
+        )
+        if stored:
+            return {"analysis": {k: stored[k] for k in ("version", "keywords", "missing_skills", "score_before")},
+                    "result": stored}
+
+    if not resume_analysis.is_cached("analysis", body.resume_text, body.job_description):
+        enforce_ai_limits(request)
+
+    try:
+        analysis = await run_in_threadpool(resume_analysis.analyze, body.resume_text, body.job_description)
+    except Exception as e:
+        raise _analysis_error(e)
+
+    return {"analysis": resume_analysis.public_analysis(analysis), "result": None}
+
+
+@app.post("/resume/optimize-v2", dependencies=[Depends(enforce_general_limits)])
+async def resume_optimize_v2(request: Request, body: AnalyzeRequest, background_tasks: BackgroundTasks):
+
+    context = await run_in_threadpool(_account_context, request, body)
+
+    if context:
+        stored = await run_in_threadpool(
+            analysis_store.load, context[0], body.resume_id, body.job_id,
+            context[1], context[2], resume_analysis.ANALYSIS_VERSION
+        )
+        if stored:
+            return stored
+
+    if not resume_analysis.is_cached("optimized", body.resume_text, body.job_description):
+        enforce_ai_limits(request)
+
+    try:
+        result = await run_in_threadpool(resume_analysis.optimize, body.resume_text, body.job_description)
+    except Exception as e:
+        raise _analysis_error(e)
+
+    if context:
+        background_tasks.add_task(
+            analysis_store.save, context[0], body.resume_id, body.job_id,
+            context[1], context[2], resume_analysis.ANALYSIS_VERSION, result
+        )
+
+    return result
 
 
 # =====================================================
