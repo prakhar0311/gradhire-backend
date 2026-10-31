@@ -32,7 +32,7 @@ from app.services.skills import SKILLS, extract_skills
 #
 # Nothing here falls back to sample or placeholder content.
 
-ANALYSIS_VERSION = "5"
+ANALYSIS_VERSION = "6"
 MODEL = "gpt-4o-mini"
 # Rewriting follows strict rules; this model is set separately so it can
 # be stronger than the one used for extraction and the rubric
@@ -162,15 +162,22 @@ Never rephrase, fix, summarize, translate or add anything. If something isn't in
 Return JSON:
 {
   "name": string,
-  "contact": string,
+  "phone": string, "email": string, "linkedin": string, "github": string, "portfolio": string, "city": string,
   "summary": string,
   "skills": [string],
   "experience": [{"title": string, "company": string, "duration": string, "location": string, "bullets": [string]}],
-  "projects": [{"title": string, "bullets": [string]}],
-  "education": [{"degree": string, "school": string, "duration": string, "location": string}]
+  "projects": [{"title": string, "tech": string, "link": string, "date": string, "bullets": [string]}],
+  "education": [{"degree": string, "school": string, "duration": string, "location": string, "gpa": string, "coursework": string}],
+  "certifications": [string],
+  "achievements": [string]
 }
+"linkedin", "github", "portfolio" are the links exactly as written (e.g. "linkedin.com/in/name").
+"tech" is the project's tech stack as written (e.g. "Swift, Firebase"), "link" its URL, "date" its date.
+"gpa" is the CGPA/GPA/percentage as written (e.g. "CGPA 8.4"); "coursework" the relevant coursework line, without its label.
 "bullets" are the lines describing what the person did, copied exactly, without the bullet symbol.
 "skills" are the items listed in the resume's skills section, one per entry."""
+
+CONTACT_FIELDS = ("phone", "email", "linkedin", "github", "portfolio", "city")
 
 
 def _validate_structure(parsed: dict, resume_text: str) -> Tuple[dict, int]:
@@ -195,17 +202,24 @@ def _validate_structure(parsed: dict, resume_text: str) -> Tuple[dict, int]:
                 dropped += 1
         return kept
 
+    def lines(values, limit) -> List[str]:
+        return [t for t in (real(v) for v in (values if isinstance(values, list) else [])) if t][:limit]
+
     structure = {
         "name": real(parsed.get("name")),
-        "contact": real(parsed.get("contact")) or str(parsed.get("contact") or "")[:200],
         "summary": real(parsed.get("summary")),
-        "skills": [s for s in (real(v) for v in (parsed.get("skills") or [])) if s][:30],
+        "skills": [s for s in (real(v) for v in (parsed.get("skills") or [])) if s][:40],
         "experience": [],
         "projects": [],
         "education": [],
+        "certifications": lines(parsed.get("certifications"), 12),
+        "achievements": lines(parsed.get("achievements"), 12),
     }
+    for field in CONTACT_FIELDS:
+        structure[field] = real(parsed.get(field))
+    structure["contact"] = " | ".join(structure[f] for f in CONTACT_FIELDS if structure[f])
 
-    for item in (parsed.get("experience") or [])[:6]:
+    for item in (parsed.get("experience") or [])[:10]:
         if isinstance(item, dict):
             structure["experience"].append({
                 "title": real(item.get("title")),
@@ -215,27 +229,26 @@ def _validate_structure(parsed: dict, resume_text: str) -> Tuple[dict, int]:
                 "bullets": bullets(item.get("bullets")),
             })
 
-    for item in (parsed.get("projects") or [])[:6]:
+    for item in (parsed.get("projects") or [])[:12]:
         if isinstance(item, dict):
             structure["projects"].append({
                 "title": real(item.get("title")),
+                "tech": real(item.get("tech")),
+                "link": real(item.get("link")),
+                "date": real(item.get("date")),
                 "bullets": bullets(item.get("bullets")),
             })
 
-    for item in (parsed.get("education") or [])[:4]:
+    for item in (parsed.get("education") or [])[:5]:
         if isinstance(item, dict):
             structure["education"].append({
                 "degree": real(item.get("degree")),
                 "school": real(item.get("school")),
                 "duration": real(item.get("duration")),
                 "location": real(item.get("location")),
+                "gpa": real(item.get("gpa")),
+                "coursework": real(item.get("coursework")),
             })
-
-    # The contact line is often reassembled from pieces; keep only pieces
-    # that are in the resume
-    if structure["contact"] and _squash(structure["contact"]) not in source:
-        pieces = [p.strip() for p in re.split(r"[|•,]", structure["contact"])]
-        structure["contact"] = " | ".join(p for p in pieces if p and _squash(p) in source)
 
     return structure, dropped
 
@@ -552,10 +565,9 @@ REWRITE_PROMPT = """You improve the bullets of THIS person's resume for THIS job
 - Where it is true from the resume, name the job's keywords the person already has (listed below) in the bullet where they used them.
 - No buzzwords ("results-driven", "passionate", "synergy", "dynamic", "proven track record", "cutting-edge").
 - Leave out bullets you can't improve honestly.
-Also write "summary": 1-2 resume-style sentences built only from facts in the resume, with no name and no pronouns (e.g. "iOS developer intern experienced in ..."), no numbers, no skills they don't list; or "" if there isn't enough.
 Also list "skills_to_list": job keywords from the given list that the person demonstrably has but that are missing from their skills section.
 
-Return JSON: {"bullets": [{"index": integer, "text": string}], "summary": string, "skills_to_list": [string]}"""
+Return JSON: {"bullets": [{"index": integer, "text": string}], "skills_to_list": [string]}"""
 
 _FILLER = re.compile(
     r"results[\s-]driven|passionate|synergy|dynamic|proven track record|cutting[\s-]edge|go[\s-]getter|"
@@ -569,7 +581,8 @@ _FILLER = re.compile(
 _OUTCOME = re.compile(
     r"(?:,\s*|\s(?:and|to|by|for|while)\s+)(?:improv|reduc|increas|optimi[sz]|enhanc|boost|driv|"
     r"visuali[sz]|support|aid|help|enabl|ensur|streamlin|maximi[sz]|minimi[sz]|accelerat|"
-    r"result|lead|leading|achiev|deliver|sav)\w*",
+    r"result|lead|leading|achiev|deliver|sav|automat|simplif|facilitat|empower|scal|transform|"
+    r"increas|elevat|strengthen|guarantee)\w*",
     re.I,
 )
 
@@ -717,8 +730,6 @@ def _apply(structure: dict, rewrite: dict) -> dict:
     for index, entry in enumerate(all_bullets(structure)):
         if index in rewrite["accepted"]:
             optimized[entry["section"]][entry["item"]]["bullets"][entry["bullet"]] = rewrite["accepted"][index]
-    if rewrite["summary"] and not optimized.get("summary"):
-        optimized["summary"] = rewrite["summary"]
     listed = {s.lower() for s in optimized.get("skills", [])}
     listed_text = " ".join(optimized.get("skills", []))
     for skill in rewrite["skills_to_list"]:
@@ -811,6 +822,7 @@ def optimize(resume_text: str, job_text: str) -> dict:
         raise AnalysisError("We couldn't find bullet points in your resume to improve.")
 
     best_resume, best_score, best_rewrite = structure, before, None
+    best_presence = presence
     focus = "Strengthen each bullet and name the job keywords the person already has where they used them."
     passes = 0
 
@@ -819,12 +831,13 @@ def optimize(resume_text: str, job_text: str) -> dict:
         rewrite = _rewrite(structure, resume_text, keywords, presence, focus)
         candidate = _apply(structure, rewrite)
         candidate_score = score_resume(candidate, keywords, job_text, resume_text)
-        candidate_score.pop("presence")
+        candidate_presence = candidate_score.pop("presence")
         # A rewrite that doesn't lower the score is still worth showing; a
         # higher one ends the search
         if best_rewrite is None and candidate_score["total"] >= before["total"] \
                 or candidate_score["total"] > best_score["total"]:
             best_resume, best_score, best_rewrite = candidate, candidate_score, rewrite
+            best_presence = candidate_presence
         if best_score["total"] > before["total"]:
             break
         focus = _weakest_focus(candidate_score)
@@ -854,13 +867,27 @@ def optimize(resume_text: str, job_text: str) -> dict:
                     "has_placeholder": bool(_PLACEHOLDER.search(improved_text)),
                 })
 
-    from app.main import build_resume_data  # the PDF's expected shape
-    optimized_resume = build_resume_data(best_resume)
+    # The full structure: the PDF renderer lays it out (resume_pdf.py)
+    optimized_resume = json.loads(json.dumps(best_resume))
+
+    # What the rewrite changed, for the "What changed" summary
+    listed_before = {s.lower() for s in structure.get("skills", [])}
+    changes = {
+        "keywords_in_bullets": [
+            k["name"] for k in keywords
+            if presence.get(k["name"]) != "bullet" and best_presence.get(k["name"]) == "bullet"
+        ],
+        "skills_listed": [
+            s for s in best_resume.get("skills", []) if s.lower() not in listed_before
+        ],
+        "placeholders": sum(1 for b in bullets_view if b["has_placeholder"]),
+    }
 
     result = {
         "version": ANALYSIS_VERSION,
         "keywords": analysis["keywords"],
         "missing_skills": analysis["missing_skills"],
+        "changes": changes,
         "score_before": before,
         "score_after": best_score,
         "improved": improved,

@@ -13,8 +13,6 @@ load_dotenv()
 # =====================================================
 
 from fastapi import FastAPI, UploadFile, File, Query, HTTPException, Form, Request, Depends, BackgroundTasks
-from fastapi.responses import FileResponse
-from starlette.background import BackgroundTask
 from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field
 from typing import List, Optional
@@ -39,7 +37,8 @@ from app.services.jobs import (
     AdzunaUnavailable
 )
 from app.services.domain_classifier import generate_job_query
-from app.services.resume_builder import build_resume_pdf
+from app.services.resume_pdf import render_resume, RenderError
+from fastapi.responses import Response, JSONResponse
 from app.services.supabase_client import check_connection
 from app.services.account import delete_account, verify_user, AccountError
 from app.services.job_store import save_served_jobs, ensure_job, JobStoreError
@@ -157,12 +156,6 @@ def enforce_general_limits(request: Request):
     ])
 
 
-def remove_file(path: str):
-    try:
-        os.remove(path)
-    except OSError:
-        pass
-
 logging.basicConfig(level=logging.WARNING)
 
 
@@ -215,15 +208,21 @@ class ScoreRequest(BaseModel):
 
 def build_resume_data(optimized: dict) -> dict:
 
-    return {
-        "name": optimized.get("name", "Candidate Name"),
-        "contact": optimized.get("contact", "Email • Phone • LinkedIn"),
-        "summary": optimized.get("summary", ""),
-        "skills": optimized.get("skills", []),
-        "experience": optimized.get("experience", []),
-        "projects": optimized.get("projects", []),
-        "education": optimized.get("education", [])
+    # Nothing is filled in: a missing name or contact stays missing
+    data = {
+        "name": optimized.get("name") or "",
+        "contact": optimized.get("contact") or "",
+        "summary": optimized.get("summary") or "",
+        "skills": optimized.get("skills") or [],
+        "experience": optimized.get("experience") or [],
+        "projects": optimized.get("projects") or [],
+        "education": optimized.get("education") or [],
+        "certifications": optimized.get("certifications") or [],
+        "achievements": optimized.get("achievements") or [],
     }
+    for field in ("phone", "email", "linkedin", "github", "portfolio", "city"):
+        data[field] = optimized.get(field) or ""
+    return data
 
 
 # =====================================================
@@ -859,7 +858,7 @@ async def download_resume(
                     text += extracted + "\n"
         resume_text = text.strip()
     except Exception as e:
-        logging.error(f"PDF extraction failed: {e}")
+        logging.error(f"PDF extraction failed: {type(e).__name__}")
         raise HTTPException(400, "Could not read the PDF file")
 
     if not resume_text:
@@ -881,8 +880,6 @@ async def download_resume(
     if provided is None:
         enforce_ai_limits(request)
 
-    pdf_path = None
-
     try:
 
         if provided is not None:
@@ -894,26 +891,79 @@ async def download_resume(
                 job_description
             )
 
-        resume_data = build_resume_data(optimized)
+        # The same one-page renderer as /resume/render
+        pdf_bytes, report = await run_in_threadpool(render_resume, build_resume_data(optimized))
+        return _pdf_response(pdf_bytes, report)
 
-        pdf_path = await run_in_threadpool(build_resume_pdf, resume_data)
-
-        # Delete the generated PDF as soon as it has been sent
-        return FileResponse(
-            pdf_path,
-            media_type="application/pdf",
-            filename="optimized_resume.pdf",
-            background=BackgroundTask(remove_file, pdf_path)
-        )
+    except RenderError as e:
+        raise HTTPException(422, e.message)
 
     except Exception as e:
 
-        if pdf_path:
-            remove_file(pdf_path)
-
-        logging.error(f"Resume generation failed: {e}")
+        logging.error(f"Resume generation failed: {type(e).__name__}")
 
         raise HTTPException(
             status_code=500,
             detail="Failed to generate optimized resume"
         )
+
+
+# =====================================================
+# RENDER A RESUME (one-page PDF from structured data)
+# =====================================================
+# No AI and no upload: the app sends the structured resume (from the
+# optimization result) and optionally which jobs, projects and sections to
+# include. The response is the PDF; X-Resume-Layout says what was left out
+# to fit one page.
+
+MAX_RENDER_JSON = 60000
+
+
+class RenderRequest(BaseModel):
+    resume: dict
+    keywords: List[str] = Field(default_factory=list, max_length=40)
+    include: Optional[dict] = None
+
+
+def _pdf_response(pdf_bytes: bytes, report: dict) -> Response:
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={
+            "Content-Disposition": 'attachment; filename="resume.pdf"',
+            # ASCII-only JSON, so names with accents survive the header
+            "X-Resume-Layout": json.dumps(report, ensure_ascii=True, separators=(",", ":")),
+        },
+    )
+
+
+@app.post("/resume/render", dependencies=[Depends(enforce_general_limits)])
+async def render_resume_endpoint(body: RenderRequest):
+
+    if len(json.dumps(body.resume)) > MAX_RENDER_JSON:
+        raise HTTPException(413, "This resume is too large to render.")
+
+    include = body.include
+    if include is not None:
+        try:
+            include = {
+                "experience": [int(i) for i in include.get("experience", [])][:20],
+                "projects": [int(i) for i in include.get("projects", [])][:20],
+                "certifications": bool(include.get("certifications", True)),
+                "achievements": bool(include.get("achievements", True)),
+                "coursework": bool(include.get("coursework", True)),
+            }
+        except (TypeError, ValueError, AttributeError):
+            raise HTTPException(422, "Invalid choice of sections.")
+
+    try:
+        pdf_bytes, report = await run_in_threadpool(
+            render_resume, build_resume_data(body.resume), body.keywords, include
+        )
+    except RenderError as e:
+        return JSONResponse(status_code=422, content={"detail": e.message, "overflow_lines": e.overflow_lines})
+    except Exception as e:
+        logging.error(f"Resume render failed: {type(e).__name__}")
+        raise HTTPException(500, "Couldn't create the PDF. Please try again.")
+
+    return _pdf_response(pdf_bytes, report)
