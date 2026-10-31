@@ -37,7 +37,7 @@ from app.services.jobs import (
     AdzunaUnavailable
 )
 from app.services.domain_classifier import generate_job_query
-from app.services.resume_pdf import render_resume, RenderError
+from app.services.resume_pdf import render_resume, fit_resume, RenderError
 from fastapi.responses import Response, JSONResponse
 from app.services.supabase_client import check_connection
 from app.services.account import delete_account, verify_user, AccountError
@@ -174,6 +174,11 @@ class AnalyzeRequest(BaseModel):
     # Signed-in users: the saved resume and the job, so the result is stored
     resume_id: Optional[str] = Field(None, max_length=36)
     job_id: Optional[str] = Field(None, max_length=36)
+
+
+class ConfirmSkillsRequest(AnalyzeRequest):
+    # [{"name": "Docker", "item": {"section": "projects", "index": 0}}]; item optional
+    confirmed: List[dict] = Field(..., min_length=1, max_length=10)
 
 
 class ResumeMatchRequest(BaseModel):
@@ -732,6 +737,23 @@ async def optimize_resume(request: OptimizeRequest):
 # results are stored per (resume, job) and reused while the text is the
 # same. /resume/optimize stays as it was for older app versions.
 
+def _structure_hash(resume_text: str) -> str:
+    return resume_analysis.content_hash("structure", resume_analysis.ANALYSIS_VERSION, resume_text.strip())
+
+
+def _stored_structure(context, body) -> Optional[dict]:
+    if not context:
+        return None
+    return analysis_store.load_structure(context[0], body.resume_id, _structure_hash(body.resume_text))
+
+
+def _save_structure_later(background_tasks: BackgroundTasks, context, body, structure: Optional[dict], stored: Optional[dict]):
+    if context and structure and stored is None:
+        background_tasks.add_task(
+            analysis_store.save_structure, context[0], body.resume_id, _structure_hash(body.resume_text), structure
+        )
+
+
 def _account_context(request: Request, body: AnalyzeRequest):
     """(user_id, resume_hash, job_hash) when the result can be stored, else None."""
     auth_header = request.headers.get("authorization", "")
@@ -758,7 +780,7 @@ def _analysis_error(e: Exception):
 
 
 @app.post("/resume/analysis", dependencies=[Depends(enforce_general_limits)])
-async def resume_analysis_endpoint(request: Request, body: AnalyzeRequest):
+async def resume_analysis_endpoint(request: Request, body: AnalyzeRequest, background_tasks: BackgroundTasks):
 
     context = await run_in_threadpool(_account_context, request, body)
 
@@ -774,11 +796,15 @@ async def resume_analysis_endpoint(request: Request, body: AnalyzeRequest):
     if not resume_analysis.is_cached("analysis", body.resume_text, body.job_description):
         enforce_ai_limits(request)
 
+    stored_structure = await run_in_threadpool(_stored_structure, context, body)
     try:
-        analysis = await run_in_threadpool(resume_analysis.analyze, body.resume_text, body.job_description)
+        analysis = await run_in_threadpool(
+            resume_analysis.analyze, body.resume_text, body.job_description, stored_structure
+        )
     except Exception as e:
         raise _analysis_error(e)
 
+    _save_structure_later(background_tasks, context, body, analysis.get("_structure"), stored_structure)
     return {"analysis": resume_analysis.public_analysis(analysis), "result": None}
 
 
@@ -798,18 +824,59 @@ async def resume_optimize_v2(request: Request, body: AnalyzeRequest, background_
     if not resume_analysis.is_cached("optimized", body.resume_text, body.job_description):
         enforce_ai_limits(request)
 
+    stored_structure = await run_in_threadpool(_stored_structure, context, body)
     try:
-        result = await run_in_threadpool(resume_analysis.optimize, body.resume_text, body.job_description)
+        result = await run_in_threadpool(
+            resume_analysis.optimize, body.resume_text, body.job_description, stored_structure
+        )
     except Exception as e:
         raise _analysis_error(e)
 
+    public = resume_analysis.public_result(result)
     if context:
         background_tasks.add_task(
             analysis_store.save, context[0], body.resume_id, body.job_id,
-            context[1], context[2], resume_analysis.ANALYSIS_VERSION, result
+            context[1], context[2], resume_analysis.ANALYSIS_VERSION, public
         )
 
-    return result
+    return public
+
+
+# "Do you have these skills?": adds only what the user confirmed, re-scores
+# the same way, and replaces the stored result for this (resume, job).
+@app.post("/resume/confirm-skills", dependencies=[Depends(enforce_general_limits)])
+async def resume_confirm_skills(request: Request, body: ConfirmSkillsRequest, background_tasks: BackgroundTasks):
+
+    context = await run_in_threadpool(_account_context, request, body)
+    enforce_ai_limits(request)
+
+    confirmed = []
+    for entry in body.confirmed:
+        if not isinstance(entry, dict) or not isinstance(entry.get("name"), str):
+            raise HTTPException(422, "Invalid skills.")
+        item = entry.get("item") if isinstance(entry.get("item"), dict) else None
+        if item is not None:
+            try:
+                item = {"section": str(item.get("section")), "index": int(item.get("index"))}
+            except (TypeError, ValueError):
+                item = None
+        confirmed.append({"name": entry["name"][:40], "item": item})
+
+    stored_structure = await run_in_threadpool(_stored_structure, context, body)
+    try:
+        result = await run_in_threadpool(
+            resume_analysis.confirm_skills, body.resume_text, body.job_description, confirmed, stored_structure
+        )
+    except Exception as e:
+        raise _analysis_error(e)
+
+    public = resume_analysis.public_result(result)
+    if context:
+        background_tasks.add_task(
+            analysis_store.save, context[0], body.resume_id, body.job_id,
+            context[1], context[2], resume_analysis.ANALYSIS_VERSION, public
+        )
+    return public
 
 
 # =====================================================
@@ -923,18 +990,28 @@ class RenderRequest(BaseModel):
     resume: dict
     keywords: List[str] = Field(default_factory=list, max_length=40)
     include: Optional[dict] = None
+    # With the job description, the response also scores this exact PDF
+    job_description: Optional[str] = Field(None, max_length=20000)
 
 
-def _pdf_response(pdf_bytes: bytes, report: dict) -> Response:
-    return Response(
-        content=pdf_bytes,
-        media_type="application/pdf",
-        headers={
-            "Content-Disposition": 'attachment; filename="resume.pdf"',
-            # ASCII-only JSON, so names with accents survive the header
-            "X-Resume-Layout": json.dumps(report, ensure_ascii=True, separators=(",", ":")),
-        },
-    )
+def _pdf_response(pdf_bytes: bytes, report: dict, score: Optional[dict] = None) -> Response:
+    headers = {
+        "Content-Disposition": 'attachment; filename="resume.pdf"',
+        # ASCII-only JSON, so names with accents survive the header
+        "X-Resume-Layout": json.dumps(report, ensure_ascii=True, separators=(",", ":")),
+    }
+    if score:
+        headers["X-Resume-Score"] = json.dumps(score, ensure_ascii=True, separators=(",", ":"))
+    return Response(content=pdf_bytes, media_type="application/pdf", headers=headers)
+
+
+def _score_choice(resume: dict, job_description: str, include: Optional[dict]) -> dict:
+    """The detailed score of the PDF for the user's own choice."""
+    keywords = resume_analysis.read_job_keywords(job_description.strip())
+    data = fit_resume(resume, [k["name"] for k in keywords], include)[0]
+    score = resume_analysis.score_resume(data, keywords, job_description.strip())
+    score.pop("presence", None)
+    return score
 
 
 @app.post("/resume/render", dependencies=[Depends(enforce_general_limits)])
@@ -956,14 +1033,21 @@ async def render_resume_endpoint(body: RenderRequest):
         except (TypeError, ValueError, AttributeError):
             raise HTTPException(422, "Invalid choice of sections.")
 
+    resume = build_resume_data(body.resume)
     try:
-        pdf_bytes, report = await run_in_threadpool(
-            render_resume, build_resume_data(body.resume), body.keywords, include
-        )
+        pdf_bytes, report = await run_in_threadpool(render_resume, resume, body.keywords, include)
     except RenderError as e:
         return JSONResponse(status_code=422, content={"detail": e.message, "overflow_lines": e.overflow_lines})
     except Exception as e:
         logging.error(f"Resume render failed: {type(e).__name__}")
         raise HTTPException(500, "Couldn't create the PDF. Please try again.")
 
-    return _pdf_response(pdf_bytes, report)
+    score = None
+    if include is not None and body.job_description and len(body.job_description.strip()) >= 60:
+        try:
+            score = await run_in_threadpool(_score_choice, resume, body.job_description, include)
+        except Exception as e:
+            # The PDF is still useful without a fresh score
+            logging.warning(f"Scoring the chosen PDF failed: {type(e).__name__}")
+
+    return _pdf_response(pdf_bytes, report, score)

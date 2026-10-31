@@ -581,10 +581,10 @@ def _limit_bullets(data: dict, job_limit: int, project_limit: int, keywords: Lis
 # PUBLIC
 # =====================================================
 
-def render_resume(resume: dict, keywords: Optional[List[str]] = None, include: Optional[dict] = None) -> Tuple[bytes, dict]:
-    """(PDF bytes, report). `include` is the user's own choice of jobs,
-    projects and optional sections; then only spacing, font size and bullet
-    limits are applied, and RenderError says how much is still too long."""
+def fit_resume(resume: dict, keywords: Optional[List[str]] = None,
+               include: Optional[dict] = None) -> Tuple[dict, Level, List[dict], dict]:
+    """The content that goes on the one page: (data, level, removed,
+    available sections). The optimizer scores exactly this content."""
 
     data = copy.deepcopy(resume or {})
     keywords = [k for k in (keywords or []) if isinstance(k, str)][:40]
@@ -640,6 +640,16 @@ def render_resume(resume: dict, keywords: Optional[List[str]] = None, include: O
     else:
         data, level, auto_removed = _auto_fit(data, keywords)
         removed += auto_removed
+
+    return data, level, removed, available
+
+
+def render_resume(resume: dict, keywords: Optional[List[str]] = None, include: Optional[dict] = None) -> Tuple[bytes, dict]:
+    """(PDF bytes, report). `include` is the user's own choice of jobs,
+    projects and optional sections; then only spacing, font size and bullet
+    limits are applied, and RenderError says how much is still too long."""
+
+    data, level, removed, available = fit_resume(resume, keywords, include)
 
     buffer = io.BytesIO()
     pdf = canvas.Canvas(buffer, pagesize=A4, pageCompression=1)

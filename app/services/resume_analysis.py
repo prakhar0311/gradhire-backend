@@ -8,6 +8,7 @@ from typing import Dict, List, Optional, Tuple
 
 from app.services.ai_optimizer import get_openai_client, resume_to_text
 from app.services.skills import SKILLS, extract_skills
+from app.services.resume_pdf import RenderError, fit_resume
 
 
 # =====================================================
@@ -32,7 +33,7 @@ from app.services.skills import SKILLS, extract_skills
 #
 # Nothing here falls back to sample or placeholder content.
 
-ANALYSIS_VERSION = "6"
+ANALYSIS_VERSION = "8"
 MODEL = "gpt-4o-mini"
 # Rewriting follows strict rules; this model is set separately so it can
 # be stronger than the one used for extraction and the rubric
@@ -313,6 +314,42 @@ def _is_nice_to_have(job_text: str, term: str) -> bool:
     return bool(marker and index >= marker.start())
 
 
+def _alternatives(job_text: str, keywords: List[dict]) -> Dict[str, set]:
+    """Keywords the posting offers as either/or: "Django or FastAPI",
+    "Power BI/Tableau"."""
+    lowered = job_text.lower()
+    spellings = {}
+    for k in keywords:
+        names = SKILLS.get(k["name"], []) + [k["name"].lower(), (k.get("phrase") or "").lower()]
+        spellings[k["name"]] = [n for n in set(names) if n]
+    groups: Dict[str, set] = {}
+    names = list(spellings)
+    for i, a in enumerate(names):
+        for b in names[i + 1:]:
+            for sa in spellings[a]:
+                for sb in spellings[b]:
+                    pattern = rf"(?<![a-z0-9]){re.escape(sa)}\s*(?:or|/)\s*{re.escape(sb)}(?![a-z0-9])|" \
+                              rf"(?<![a-z0-9]){re.escape(sb)}\s*(?:or|/)\s*{re.escape(sa)}(?![a-z0-9])"
+                    if re.search(pattern, lowered):
+                        groups.setdefault(a, set()).add(b)
+                        groups.setdefault(b, set()).add(a)
+    return groups
+
+
+def _resolve_alternatives(keywords: List[dict], presence: Dict[str, Optional[str]], job_text: str) -> List[dict]:
+    """When the posting accepts A or B and the resume has one, the other
+    isn't required (it stays listed as nice to have)."""
+    groups = _alternatives(job_text, keywords)
+    resolved = []
+    for k in keywords:
+        alternatives = groups.get(k["name"], set())
+        k = dict(k, alternatives=sorted(alternatives))
+        if k["required"] and not presence.get(k["name"]) and any(presence.get(a) for a in alternatives):
+            k = dict(k, required=False, alternative_of=sorted(a for a in alternatives if presence.get(a)))
+        resolved.append(k)
+    return resolved
+
+
 def _canonical(term: str) -> str:
     skills = extract_skills(term)
     # Only when the term IS a skill ("Postgres" → PostgreSQL), not a phrase
@@ -492,9 +529,38 @@ def _strength_label(value: float) -> str:
     return "Weak"
 
 
-def score_resume(structure: dict, keywords: List[dict], job_text: str, resume_text: str) -> dict:
+def _rubric_text(structure: dict) -> str:
+    """What the relevance rubric reads: jobs and projects with their
+    bullets. Not the Skills list, so listing a skill can't move it; not
+    unfilled [placeholders], which aren't evidence."""
+    lines = []
+    for job in structure.get("experience", []):
+        lines.append(" ".join(p for p in [job.get("title"), job.get("company")] if p))
+        lines += job.get("bullets", [])
+    for project in structure.get("projects", []):
+        lines.append(" | ".join(p for p in [project.get("title"), project.get("tech")] if p))
+        lines += project.get("bullets", [])
+    return _without_placeholders("\n".join(l for l in lines if l))
+
+
+def fitted(structure: dict, keywords: List[dict]) -> dict:
+    """The content that ends up on the one-page PDF."""
+    try:
+        return fit_resume(structure, [k["name"] for k in keywords])[0]
+    except RenderError:
+        return structure
+
+
+def keyword_presences(structure: dict, keywords: List[dict], source: str) -> Dict[str, Optional[str]]:
+    return {k["name"]: keyword_presence(k, structure, source) for k in keywords}
+
+
+def score_resume(structure: dict, keywords: List[dict], job_text: str, resume_text: str = "",
+                 rating: Optional[int] = None) -> dict:
     """The one scoring function for both versions. Returns the total and
-    the breakdown that explains it."""
+    the breakdown that explains it. Callers pass the one-page content and
+    no extra text, so the score is for exactly what the PDF shows.
+    `rating` reuses a rubric rating (for "add X to reach about N")."""
 
     flat = flatten(structure)
     source = resume_text + "\n" + flat
@@ -521,8 +587,8 @@ def score_resume(structure: dict, keywords: List[dict], job_text: str, resume_te
     bullets = all_bullets(structure)
     bullet_ratio = sum(_bullet_quality(b["text"]) for b in bullets) / len(bullets) if bullets else 0.0
 
-    # Placeholders the user hasn't filled in are not evidence
-    rating = _rubric(_without_placeholders(flat), job_text)
+    if rating is None:
+        rating = _rubric(_rubric_text(structure), job_text)
 
     total = (
         evidence_ratio * W_KEYWORDS
@@ -565,6 +631,15 @@ REWRITE_PROMPT = """You improve the bullets of THIS person's resume for THIS job
 - Where it is true from the resume, name the job's keywords the person already has (listed below) in the bullet where they used them.
 - No buzzwords ("results-driven", "passionate", "synergy", "dynamic", "proven track record", "cutting-edge").
 - Leave out bullets you can't improve honestly.
+
+Good rewrites (same meaning, stronger and clearer):
+  "Worked on Python scripts for the team" -> "Wrote Python scripts for the team"
+  "Did testing of the application" -> "Tested the application before each release" ONLY if the resume says so; otherwise "Tested the application"
+  "Made a website for the college club" -> "Built a website for the college club, used by [N] members"
+  "Helped with tasks given by the manager" -> leave out (nothing honest to add)
+Rejected rewrites (they add purposes or results the resume doesn't state):
+  "Wrote Python scripts to automate team reporting"   (adds "to automate reporting")
+  "Tested the application, ensuring high quality"     (adds "ensuring high quality")
 Also list "skills_to_list": job keywords from the given list that the person demonstrably has but that are missing from their skills section.
 
 Return JSON: {"bullets": [{"index": integer, "text": string}], "skills_to_list": [string]}"""
@@ -617,8 +692,17 @@ def _adds_unstated_outcome(text: str, original: str) -> bool:
     return new_outcomes and not _PLACEHOLDER.search(text)
 
 
-def _check_new_text(text: str, original: str, resume_text: str, missing: List[dict]) -> Optional[str]:
-    """Why a rewritten line isn't acceptable, or None."""
+_LEADERSHIP_VERBS = {
+    "managed", "led", "lead", "spearheaded", "owned", "headed", "directed", "oversaw", "supervised",
+    "orchestrated", "championed", "mentored", "manage", "own", "head", "direct", "oversee", "supervise",
+}
+
+
+def _check_new_text(text: str, original: str, resume_text: str, missing: List[dict],
+                    item_text: Optional[str] = None) -> Optional[str]:
+    """Why a rewritten line isn't acceptable, or None. With `item_text`
+    (the job or project the bullet belongs to), a skill may only be added
+    if that same job or project shows it."""
 
     if not text or len(text) > 320:
         return "empty or too long"
@@ -631,11 +715,18 @@ def _check_new_text(text: str, original: str, resume_text: str, missing: List[di
     invented = extract_skills(text) - resume_skills
     if invented:
         return f"added skills {sorted(invented)}"
+    if item_text is not None:
+        elsewhere = (extract_skills(text) - extract_skills(original)) - extract_skills(item_text)
+        if elsewhere:
+            return f"named {sorted(elsewhere)}, which this job or project doesn't show"
     for keyword in missing:
         if _mentions(keyword, text):
             return f"added {keyword['name']}, which the resume doesn't have"
     if _FILLER.search(text):
         return "filler wording"
+    first_new = (re.findall(r"[A-Za-z]+", text) or [""])[0].lower()
+    if first_new in _LEADERSHIP_VERBS and not (_LEADERSHIP_VERBS & set(re.findall(r"[a-z]+", original.lower()))):
+        return f"'{first_new}' claims leading or owning the work, which the original doesn't say"
     if original and _adds_unstated_outcome(text, original):
         return "added a result or purpose the resume doesn't state (use a [placeholder] instead)"
     added = _new_details(text, original, resume_text)
@@ -644,17 +735,48 @@ def _check_new_text(text: str, original: str, resume_text: str, missing: List[di
     return None
 
 
+def _item_texts(structure: dict) -> Dict[Tuple[str, int], str]:
+    """Each job's and project's own text: heading, tech stack and bullets."""
+    texts = {}
+    for section in ("experience", "projects"):
+        for index, item in enumerate(structure.get(section, [])):
+            parts = [item.get("title"), item.get("company"), item.get("tech")] + item.get("bullets", [])
+            texts[(section, index)] = " ".join(p for p in parts if p)
+    return texts
+
+
+def _helps(text: str, original: str, keywords: List[dict]) -> bool:
+    """A rewrite is worth showing only if it's measurably better: a
+    stronger bullet, a job keyword named, or a result placeholder."""
+    if _bullet_quality(text) > _bullet_quality(original):
+        return True
+    if any(_mentions(k, text) and not _mentions(k, original) for k in keywords):
+        return True
+    return bool(_PLACEHOLDER.search(text)) and not _PLACEHOLDER.search(original)
+
+
 def _rewrite_once(structure: dict, resume_text: str, keywords: List[dict], presence: Dict[str, Optional[str]],
                   focus: str, feedback: str) -> dict:
     bullets = all_bullets(structure)
     have = [k["name"] for k in keywords if presence.get(k["name"])]
     missing = [k for k in keywords if not presence.get(k["name"])]
+    items = _item_texts(structure)
 
-    numbered = "\n".join(f"{i}. {b['text']}" for i, b in enumerate(bullets))
+    # Which job keywords each job or project actually shows (only those
+    # may be named in its bullets)
+    hints = []
+    for (section, index), item_text in items.items():
+        shown = [k["name"] for k in keywords if presence.get(k["name"]) and _mentions(k, item_text)]
+        heading = structure[section][index].get("title") or structure[section][index].get("company") or ""
+        if shown and heading:
+            hints.append(f"- {heading}: {', '.join(shown)}")
+
+    numbered = "\n".join(f"{i}. [{b['heading']}] {b['text']}" for i, b in enumerate(bullets))
     user = (
         f"Job keywords the person already has: {', '.join(have) or 'none'}\n"
         f"Job keywords the person does NOT have (never mention): {', '.join(k['name'] for k in missing) or 'none'}\n"
-        f"Focus: {focus}\n"
+        + ("Keywords each job/project shows (name them only in that item's bullets):\n" + "\n".join(hints) + "\n" if hints else "")
+        + f"Focus: {focus}\n"
         + (f"Your previous answer was rejected: {feedback}\n" if feedback else "")
         + f"\nFull resume (the only source of facts):\n{resume_text[:MAX_RESUME_CHARS]}\n\nBullets:\n{numbered}"
     )
@@ -675,9 +797,13 @@ def _rewrite_once(structure: dict, resume_text: str, keywords: List[dict], prese
         if not (0 <= index < len(bullets)) or index in accepted:
             continue
         text = _clean_line(entry.get("text"))
-        problem = _check_new_text(text, bullets[index]["text"], resume_text, missing)
+        entry_info = bullets[index]
+        problem = _check_new_text(text, entry_info["text"], resume_text, missing,
+                                  items.get((entry_info["section"], entry_info["item"]), ""))
         if problem:
             rejected.append(f"bullet {index}: {problem}")
+        elif not _helps(text, entry_info["text"], keywords):
+            continue  # a synonym swap: keep the user's own wording
         else:
             accepted[index] = text
 
@@ -704,10 +830,12 @@ def _rewrite_once(structure: dict, resume_text: str, keywords: List[dict], prese
 
 def _rewrite(structure: dict, resume_text: str, keywords: List[dict], presence: Dict[str, Optional[str]],
              focus: str) -> dict:
-    """One rewrite, retried once if the answer is malformed or mostly rejected."""
+    """One rewrite, retried once if the answer is malformed or mostly
+    rejected. A malformed answer both times is an error; valid answers whose
+    rewrites all failed the honesty checks give an empty rewrite."""
 
     feedback = ""
-    last = None
+    best = None
     for _ in range(2):
         try:
             result = _rewrite_once(structure, resume_text, keywords, presence, focus, feedback)
@@ -715,14 +843,15 @@ def _rewrite(structure: dict, resume_text: str, keywords: List[dict], presence: 
             feedback = "the answer was not the requested JSON"
             logging.warning(f"Rewrite attempt failed: {type(e).__name__}")
             continue
-        last = result
+        if best is None or len(result["accepted"]) > len(best["accepted"]):
+            best = result
         if result["accepted"] and len(result["accepted"]) >= len(result["rejected"]):
             return result
         feedback = "; ".join(result["rejected"][:6]) or "no bullet was improved"
 
-    if last and last["accepted"]:
-        return last
-    raise AnalysisError("We couldn't rewrite your bullets reliably. Please try again.")
+    if best is None:
+        raise AnalysisError("We couldn't rewrite your bullets reliably. Please try again.")
+    return best
 
 
 def _apply(structure: dict, rewrite: dict) -> dict:
@@ -736,6 +865,18 @@ def _apply(structure: dict, rewrite: dict) -> dict:
         if skill.lower() not in listed and skill not in extract_skills(listed_text):
             optimized.setdefault("skills", []).append(skill)
     return optimized
+
+
+def _list_shown_skills(resume: dict, keywords: List[dict], presence: Dict[str, Optional[str]]) -> dict:
+    """Job skills the resume shows in a job or project but leaves out of
+    its Skills list are added to the list (variants like Postgres count)."""
+    updated = json.loads(json.dumps(resume))
+    listed_text = " ".join(updated.get("skills", []))
+    listed = extract_skills(listed_text) | {s.lower() for s in updated.get("skills", [])}
+    for k in keywords:
+        if presence.get(k["name"]) and k["name"] in SKILLS and k["name"] not in listed and k["name"].lower() not in listed:
+            updated.setdefault("skills", []).append(k["name"])
+    return updated
 
 
 def _weakest_focus(score: dict) -> str:
@@ -763,8 +904,10 @@ def _keyword_view(keywords: List[dict], presence: Dict[str, Optional[str]]) -> L
     ]
 
 
-def analyze(resume_text: str, job_text: str) -> dict:
-    """Job keywords, matched vs missing, and the original resume's score."""
+def analyze(resume_text: str, job_text: str, structure: Optional[dict] = None) -> dict:
+    """Job keywords, matched vs missing, and the original resume's score
+    (for its one-page version). `structure` is the stored structure of a
+    saved resume, so it isn't read again."""
 
     resume_text = (resume_text or "").strip()
     job_text = (job_text or "").strip()
@@ -778,14 +921,21 @@ def analyze(resume_text: str, job_text: str) -> dict:
     if cached is not None:
         return cached
 
+    if structure is not None:
+        _cache_set("structure:" + content_hash(ANALYSIS_VERSION, resume_text), structure, 3600)
+
     with ThreadPoolExecutor(max_workers=2) as pool:
         structure_future = pool.submit(read_structure, resume_text)
         keywords_future = pool.submit(read_job_keywords, job_text)
         structure = structure_future.result()
         keywords = keywords_future.result()
 
-    before = score_resume(structure, keywords, job_text, resume_text)
-    presence = before.pop("presence")
+    # Matched vs missing: anywhere in the resume
+    presence = keyword_presences(structure, keywords, resume_text + "\n" + flatten(structure))
+    keywords = _resolve_alternatives(keywords, presence, job_text)
+    # The score: the one page the user would send
+    before = score_resume(fitted(structure, keywords), keywords, job_text)
+    before.pop("presence")
 
     result = {
         "version": ANALYSIS_VERSION,
@@ -803,16 +953,102 @@ def analyze(resume_text: str, job_text: str) -> dict:
     return result
 
 
-def optimize(resume_text: str, job_text: str) -> dict:
-    """The full result: before/after score, rewritten bullets and the
-    optimized resume (for the PDF). At most two rewrite passes."""
+def _missing_required(keywords: List[dict], presence: Dict[str, Optional[str]]) -> List[str]:
+    """Missing required skills, naming only one of an either/or pair."""
+    names: List[str] = []
+    for k in keywords:
+        if k["required"] and not presence.get(k["name"]) and not set(k.get("alternatives", [])) & set(names):
+            names.append(k["name"])
+    return names
+
+
+def _potential(resume: dict, keywords: List[dict], presence: Dict[str, Optional[str]], job_text: str,
+               score: dict) -> Optional[dict]:
+    """"Add Docker and AWS to reach about 80": the same scoring with the
+    top missing required skills listed, keeping the relevance rating."""
+    missing = _missing_required(keywords, presence)[:3]
+    if not missing:
+        return None
+    hypothetical = json.loads(json.dumps(resume))
+    hypothetical.setdefault("skills", []).extend(missing)
+    estimate = score_resume(fitted(hypothetical, keywords), keywords, job_text,
+                            rating=score["breakdown"]["relevance"])
+    if estimate["total"] <= score["total"]:
+        return None
+    return {"skills": missing, "score": estimate["total"]}
+
+
+def _message(before: dict, after: dict, missing_required: List[str]) -> str:
+    if not missing_required and after["total"] >= 85:
+        return "Your resume already covers this job really well."
+    if not missing_required:
+        return "Your resume covers every listed requirement for this job."
+    needed = ", ".join(missing_required[:4])
+    if after["total"] > before["total"]:
+        return f"To go further, you'd need: {needed} (not in your resume)."
+    return f"To improve further, you'd need: {needed} (not in your resume)."
+
+
+def _bullet_views(structure: dict, accepted: Dict[int, str]) -> List[dict]:
+    views = []
+    for index, entry in enumerate(all_bullets(structure)):
+        if index in accepted:
+            views.append({
+                "section": entry["section"],
+                "heading": entry["heading"],
+                "original": entry["text"],
+                "improved": accepted[index],
+                "has_placeholder": bool(_PLACEHOLDER.search(accepted[index])),
+            })
+    return views
+
+
+def _result(analysis: dict, keywords: List[dict], presence: Dict[str, Optional[str]], structure: dict,
+            best_resume: dict, best_score: dict, before: dict, bullets_view: List[dict], job_text: str,
+            passes: int, confirmed: List[str]) -> dict:
+    listed_before = {s.lower() for s in structure.get("skills", [])}
+    after_presence = keyword_presences(best_resume, keywords, flatten(best_resume))
+    missing_required = _missing_required(keywords, presence)
+    return {
+        "version": ANALYSIS_VERSION,
+        "keywords": _keyword_view(keywords, presence),
+        "missing_skills": [
+            {"name": k["name"], "required": k["required"], "quote": k.get("quote", "")}
+            for k in keywords if not presence.get(k["name"])
+        ],
+        "changes": {
+            "keywords_in_bullets": [
+                k["name"] for k in keywords
+                if analysis["_presence"].get(k["name"]) != "bullet" and after_presence.get(k["name"]) == "bullet"
+            ],
+            "skills_listed": [s for s in best_resume.get("skills", []) if s.lower() not in listed_before],
+            "placeholders": sum(1 for b in bullets_view if b["has_placeholder"]),
+            "confirmed_skills": confirmed,
+        },
+        "score_before": before,
+        "score_after": best_score,
+        "improved": best_score["total"] > before["total"],
+        "passes": passes,
+        "message": _message(before, best_score, missing_required),
+        "potential": _potential(best_resume, keywords, presence, job_text, best_score),
+        "bullets": bullets_view,
+        # The full structure; the renderer fits it to one page exactly as scored
+        "optimized_resume": json.loads(json.dumps(best_resume)),
+        "optimized_resume_text": flatten(fitted(best_resume, keywords)),
+    }
+
+
+def optimize(resume_text: str, job_text: str, structure: Optional[dict] = None) -> dict:
+    """The full result: before/after score (each for its one-page PDF),
+    rewritten bullets and the optimized resume. At most two rewrite
+    passes; a version that scores lower than the original is never kept."""
 
     key = "optimized:" + content_hash(ANALYSIS_VERSION, resume_text.strip(), job_text.strip())
     cached = _cache_get(key)
     if cached is not None:
         return cached
 
-    analysis = analyze(resume_text, job_text)
+    analysis = analyze(resume_text, job_text, structure)
     structure = analysis["_structure"]
     keywords = analysis["_keywords"]
     presence = analysis["_presence"]
@@ -821,82 +1057,149 @@ def optimize(resume_text: str, job_text: str) -> dict:
     if not all_bullets(structure):
         raise AnalysisError("We couldn't find bullet points in your resume to improve.")
 
-    best_resume, best_score, best_rewrite = structure, before, None
-    best_presence = presence
+    # Skills the resume shows but doesn't list: never lowers the score
+    base = _list_shown_skills(structure, keywords, presence)
+    base_score = score_resume(fitted(base, keywords), keywords, job_text)
+    base_score.pop("presence")
+    best_resume, best_score, best_rewrite = base, base_score, None
+    if best_score["total"] < before["total"]:
+        best_resume, best_score = structure, before
+
     focus = "Strengthen each bullet and name the job keywords the person already has where they used them."
     passes = 0
 
     for _ in range(MAX_REWRITE_PASSES):
         passes += 1
         rewrite = _rewrite(structure, resume_text, keywords, presence, focus)
-        candidate = _apply(structure, rewrite)
-        candidate_score = score_resume(candidate, keywords, job_text, resume_text)
-        candidate_presence = candidate_score.pop("presence")
-        # A rewrite that doesn't lower the score is still worth showing; a
-        # higher one ends the search
-        if best_rewrite is None and candidate_score["total"] >= before["total"] \
-                or candidate_score["total"] > best_score["total"]:
+        if not rewrite["accepted"]:
+            focus = "Use only plainer, stronger verbs and [X] placeholders for results; add nothing else."
+            continue
+        candidate = _list_shown_skills(_apply(structure, rewrite), keywords, presence)
+        candidate_score = score_resume(fitted(candidate, keywords), keywords, job_text)
+        candidate_score.pop("presence")
+        # Never worse than the best so far; an equal rewrite is still worth
+        # showing, a higher one ends the search
+        if candidate_score["total"] > best_score["total"] \
+                or (best_rewrite is None and candidate_score["total"] >= best_score["total"]):
             best_resume, best_score, best_rewrite = candidate, candidate_score, rewrite
-            best_presence = candidate_presence
-        if best_score["total"] > before["total"]:
+        if best_score["total"] > before["total"] and best_rewrite is not None:
             break
         focus = _weakest_focus(candidate_score)
 
-    improved = best_score["total"] > before["total"]
-    missing_required = [k["name"] for k in keywords if k["required"] and not presence.get(k["name"])]
+    bullets_view = _bullet_views(structure, best_rewrite["accepted"]) if best_rewrite else []
+    result = _result(analysis, keywords, presence, structure, best_resume, best_score, before,
+                     bullets_view, job_text, passes, [])
+    if not bullets_view and before["total"] < 70:
+        result["message"] = ("We couldn't strengthen your bullets without adding things your resume doesn't say. "
+                             + result["message"])
+    result["_bullets_accepted"] = best_rewrite["accepted"] if best_rewrite else {}
+    _cache_set(key, result, 3600)
+    return result
 
-    if improved:
-        message = ""
-    elif before["total"] >= 80 or not missing_required:
-        message = "Your resume already covers this job well."
-    else:
-        message = f"To improve further, you'd need: {', '.join(missing_required[:4])} (not in your resume)."
-    if improved and missing_required:
-        message = f"To go further, you'd need: {', '.join(missing_required[:4])} (not in your resume)."
 
-    bullets_view = []
-    if best_rewrite:
-        for index, entry in enumerate(all_bullets(structure)):
-            if index in best_rewrite["accepted"]:
-                improved_text = best_rewrite["accepted"][index]
-                bullets_view.append({
-                    "section": entry["section"],
-                    "heading": entry["heading"],
-                    "original": entry["text"],
-                    "improved": improved_text,
-                    "has_placeholder": bool(_PLACEHOLDER.search(improved_text)),
-                })
+# =====================================================
+# "DO YOU HAVE THESE SKILLS?" (confirmed by the user)
+# =====================================================
 
-    # The full structure: the PDF renderer lays it out (resume_pdf.py)
-    optimized_resume = json.loads(json.dumps(best_resume))
+PLACE_SKILL_PROMPT = """The person confirmed they used a skill in one job or project. Rewrite exactly ONE of the given bullets of that item so it names the skill where it fits, keeping the meaning and wording style.
+Never add other skills, numbers, results or details. Return JSON: {"index": integer, "text": string}"""
 
-    # What the rewrite changed, for the "What changed" summary
-    listed_before = {s.lower() for s in structure.get("skills", [])}
-    changes = {
-        "keywords_in_bullets": [
-            k["name"] for k in keywords
-            if presence.get(k["name"]) != "bullet" and best_presence.get(k["name"]) == "bullet"
-        ],
-        "skills_listed": [
-            s for s in best_resume.get("skills", []) if s.lower() not in listed_before
-        ],
-        "placeholders": sum(1 for b in bullets_view if b["has_placeholder"]),
-    }
 
-    result = {
-        "version": ANALYSIS_VERSION,
-        "keywords": analysis["keywords"],
-        "missing_skills": analysis["missing_skills"],
-        "changes": changes,
-        "score_before": before,
-        "score_after": best_score,
-        "improved": improved,
-        "passes": passes,
-        "message": message,
-        "bullets": bullets_view,
-        "optimized_resume": optimized_resume,
-        "optimized_resume_text": flatten(best_resume),
-    }
+def _place_skill(resume: dict, section: str, index: int, skill: str, resume_text: str) -> Tuple[dict, Optional[dict]]:
+    """Names a confirmed skill in one bullet of the chosen job or project.
+    Returns (resume, rewrite) or (resume unchanged, None)."""
+    items = resume.get(section) or []
+    if not (0 <= index < len(items)) or not items[index].get("bullets"):
+        return resume, None
+    bullets = items[index]["bullets"]
+    numbered = "\n".join(f"{i}. {b}" for i, b in enumerate(bullets))
+    heading = items[index].get("title") or items[index].get("company") or ""
+    try:
+        parsed = _chat_json(PLACE_SKILL_PROMPT, f"Skill: {skill}\nItem: {heading}\nBullets:\n{numbered}", 300, REWRITE_MODEL)
+        bullet_index = int(parsed.get("index"))
+        text = _clean_line(parsed.get("text"))
+    except Exception:
+        return resume, None
+    if not (0 <= bullet_index < len(bullets)):
+        return resume, None
+    original = bullets[bullet_index]
+    allowed = resume_text + f"\nConfirmed: {skill}"
+    # The confirmed skill is the only new thing allowed
+    if _check_new_text(text, original, allowed, []) or skill.lower() not in text.lower():
+        return resume, None
+    updated = json.loads(json.dumps(resume))
+    updated[section][index]["bullets"][bullet_index] = text
+    return updated, {"heading": heading, "section": section, "original": original, "improved": text}
+
+
+def confirm_skills(resume_text: str, job_text: str, confirmed: List[dict],
+                   structure: Optional[dict] = None) -> dict:
+    """Adds the skills the user confirmed (and, where they said where they
+    used one, names it in one bullet there), then re-scores the same way.
+    Nothing unconfirmed is added; the score can't go below the previous
+    optimized one."""
+
+    names = []
+    for entry in confirmed[:10]:
+        name = re.sub(r"\s+", " ", str(entry.get("name") or "")).strip()[:40]
+        if name and name.lower() not in {n.lower() for n in names}:
+            names.append(name)
+
+    key = "confirmed:" + content_hash(ANALYSIS_VERSION, resume_text.strip(), job_text.strip(),
+                                       json.dumps(sorted(json.dumps(e, sort_keys=True) for e in confirmed)))
+    cached = _cache_get(key)
+    if cached is not None:
+        return cached
+
+    base_result = optimize(resume_text, job_text, structure)
+    analysis = analyze(resume_text, job_text, structure)
+    original = analysis["_structure"]
+    keywords = analysis["_keywords"]
+    job_names = {k["name"].lower(): k["name"] for k in keywords}
+    # Only the job's own missing skills can be confirmed
+    names = [job_names[n.lower()] for n in names if n.lower() in job_names]
+
+    resume = json.loads(json.dumps(base_result["optimized_resume"]))
+    for name in names:
+        if name.lower() not in {s.lower() for s in resume.get("skills", [])}:
+            resume.setdefault("skills", []).append(name)
+
+    skills_only = json.loads(json.dumps(resume))
+    placed = []
+    for entry in confirmed[:10]:
+        item = entry.get("item") or {}
+        name = job_names.get(str(entry.get("name") or "").strip().lower())
+        if not name or item.get("section") not in ("experience", "projects"):
+            continue
+        resume, rewrite = _place_skill(resume, item["section"], int(item.get("index", -1)), name, resume_text)
+        if rewrite:
+            placed.append(rewrite)
+
+    confirmed_text = resume_text + "\nConfirmed skills: " + ", ".join(names)
+    presence = keyword_presences(original, keywords, confirmed_text + "\n" + flatten(resume))
+    # A confirmed Django also satisfies "Django or FastAPI"
+    keywords = _resolve_alternatives(keywords, presence, job_text)
+    score = score_resume(fitted(resume, keywords), keywords, job_text)
+    score.pop("presence")
+    if placed:
+        plain = score_resume(fitted(skills_only, keywords), keywords, job_text)
+        plain.pop("presence")
+        if plain["total"] > score["total"]:
+            resume, score, placed = skills_only, plain, []
+    previous = base_result["score_after"]
+    if score["total"] < previous["total"] and keywords == analysis["_keywords"]:
+        # Listing skills can't lower the rule-based parts; keep the better one
+        resume, score, placed = json.loads(json.dumps(base_result["optimized_resume"])), previous, []
+
+    bullets_view = [dict(b) for b in base_result["bullets"]]
+    for p in placed:
+        same = next((b for b in bullets_view if b["improved"] == p["original"]), None)
+        if same:
+            same["improved"] = p["improved"]
+        else:
+            bullets_view.append(dict(p, has_placeholder=False))
+    result = _result(analysis, keywords, presence, original, resume, score, analysis["score_before"],
+                     bullets_view, job_text, base_result["passes"], names)
     _cache_set(key, result, 3600)
     return result
 
@@ -905,6 +1208,10 @@ def is_cached(kind: str, resume_text: str, job_text: str) -> bool:
     """kind: "analysis" or "optimized"; True when no AI call is needed."""
     key = f"{kind}:" + content_hash(ANALYSIS_VERSION, resume_text.strip(), job_text.strip())
     return _cache_get(key) is not None
+
+
+def public_result(result: dict) -> dict:
+    return {k: v for k, v in result.items() if not k.startswith("_")}
 
 
 def public_analysis(analysis: dict) -> dict:
