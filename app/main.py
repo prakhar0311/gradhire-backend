@@ -201,11 +201,6 @@ class AnalyzeRequest(BaseModel):
     job_id: Optional[str] = Field(None, max_length=36)
 
 
-class ConfirmSkillsRequest(AnalyzeRequest):
-    # [{"name": "Docker", "item": {"section": "projects", "index": 0}}]; item optional
-    confirmed: List[dict] = Field(..., min_length=1, max_length=10)
-
-
 class ResumeMatchRequest(BaseModel):
     resume_id: str = Field(..., max_length=36)
     country: str = Field("in", max_length=4)
@@ -882,43 +877,6 @@ async def resume_optimize_v2(request: Request, body: AnalyzeRequest, background_
             context[1], context[2], resume_analysis.ANALYSIS_VERSION, public
         )
 
-    return public
-
-
-# "Do you have these skills?": adds only what the user confirmed, re-scores
-# the same way, and replaces the stored result for this (resume, job).
-@app.post("/resume/confirm-skills", dependencies=[Depends(enforce_general_limits)])
-async def resume_confirm_skills(request: Request, body: ConfirmSkillsRequest, background_tasks: BackgroundTasks):
-
-    context = await run_in_threadpool(_account_context, request, body)
-    enforce_ai_limits(request)
-
-    confirmed = []
-    for entry in body.confirmed:
-        if not isinstance(entry, dict) or not isinstance(entry.get("name"), str):
-            raise HTTPException(422, "Invalid skills.")
-        item = entry.get("item") if isinstance(entry.get("item"), dict) else None
-        if item is not None:
-            try:
-                item = {"section": str(item.get("section")), "index": int(item.get("index"))}
-            except (TypeError, ValueError):
-                item = None
-        confirmed.append({"name": entry["name"][:40], "item": item})
-
-    stored_structure = await run_in_threadpool(_stored_structure, context, body)
-    try:
-        result = await run_in_threadpool(
-            resume_analysis.confirm_skills, body.resume_text, body.job_description, confirmed, stored_structure
-        )
-    except Exception as e:
-        raise _analysis_error(e)
-
-    public = resume_analysis.public_result(result)
-    if context:
-        background_tasks.add_task(
-            analysis_store.save, context[0], body.resume_id, body.job_id,
-            context[1], context[2], resume_analysis.ANALYSIS_VERSION, public
-        )
     return public
 
 
