@@ -80,8 +80,12 @@ ALLOWED_MAX_DAYS = {1, 3, 7, 30}
 # RATE LIMITING (in-memory; fine for a single instance)
 # =====================================================
 
-AI_PER_MINUTE = 5          # OpenAI calls per user per minute
-AI_PER_DAY = 30            # OpenAI calls per user per day
+AI_PER_MINUTE = 5          # Optimizations per signed-in user per minute
+AI_PER_DAY = 30            # Optimizations per signed-in user per day
+# Guests are counted per IP. Students often share one (campus Wi-Fi), so
+# the IP limits are higher than one person's.
+AI_PER_IP_MINUTE = 15
+AI_PER_IP_DAY = 100
 AI_GLOBAL_PER_DAY = 500    # Hard cap on OpenAI calls per day across all users
 GENERAL_PER_MINUTE = 30    # Other endpoints, per user per minute
 
@@ -136,16 +140,37 @@ def client_ip(request: Request) -> str:
     return request.client.host if request.client else "unknown"
 
 
-def enforce_ai_limits(request: Request):
-    ip = client_ip(request)
+def enforce_ai_limits(request: Request, user_id: Optional[str] = None):
+    """Signed-in users (verified token) have their own limit; guests share
+    a larger one per IP."""
+    if user_id:
+        key, per_minute, per_day = f"user:{user_id}", AI_PER_MINUTE, AI_PER_DAY
+    else:
+        key, per_minute, per_day = f"ip:{client_ip(request)}", AI_PER_IP_MINUTE, AI_PER_IP_DAY
     limiter.check([
-        (f"ai-min:{ip}", AI_PER_MINUTE, MINUTE,
+        (f"ai-min:{key}", per_minute, MINUTE,
          "Too many requests. Please wait a minute and try again."),
-        (f"ai-day:{ip}", AI_PER_DAY, DAY,
+        (f"ai-day:{key}", per_day, DAY,
          "You've reached today's limit for AI optimizations. Please try again tomorrow."),
         ("ai-global-day", AI_GLOBAL_PER_DAY, DAY,
          "AI optimization is busy right now. Please try again later."),
     ])
+
+
+def enforce_ip_ai_limits(request: Request):
+    """For dependencies: only the request, so no client-supplied user id."""
+    enforce_ai_limits(request)
+
+
+def verified_user_id(request: Request) -> Optional[str]:
+    """The signed-in user's id from a valid Bearer token, else None."""
+    auth_header = request.headers.get("authorization", "")
+    if not auth_header.lower().startswith("bearer ") or len(auth_header) < 20:
+        return None
+    try:
+        return str(verify_user(auth_header[7:].strip()).id)
+    except AccountError:
+        return None
 
 
 def enforce_general_limits(request: Request):
@@ -684,7 +709,7 @@ async def new_grad_jobs(
 # RESUME OPTIMIZATION
 # =====================================================
 
-@app.post("/resume/optimize", dependencies=[Depends(enforce_ai_limits)])
+@app.post("/resume/optimize", dependencies=[Depends(enforce_ip_ai_limits)])
 async def optimize_resume(request: OptimizeRequest):
 
     try:
@@ -794,7 +819,8 @@ async def resume_analysis_endpoint(request: Request, body: AnalyzeRequest, backg
                     "result": stored}
 
     if not resume_analysis.is_cached("analysis", body.resume_text, body.job_description):
-        enforce_ai_limits(request)
+        # One optimization is charged once: here, not again for the rewrite
+        enforce_ai_limits(request, context[0] if context else await run_in_threadpool(verified_user_id, request))
 
     stored_structure = await run_in_threadpool(_stored_structure, context, body)
     try:
@@ -821,8 +847,10 @@ async def resume_optimize_v2(request: Request, body: AnalyzeRequest, background_
         if stored:
             return stored
 
-    if not resume_analysis.is_cached("optimized", body.resume_text, body.job_description):
-        enforce_ai_limits(request)
+    # Charged in /resume/analysis; only a direct call (no analysis yet) counts here
+    if not resume_analysis.is_cached("optimized", body.resume_text, body.job_description) \
+            and not resume_analysis.is_cached("analysis", body.resume_text, body.job_description):
+        enforce_ai_limits(request, context[0] if context else await run_in_threadpool(verified_user_id, request))
 
     stored_structure = await run_in_threadpool(_stored_structure, context, body)
     try:
