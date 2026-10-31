@@ -8,6 +8,9 @@ from openai import OpenAI
 # OPENAI CLIENT (SAFE INITIALIZATION)
 # =====================================================
 
+OPENAI_TIMEOUT_SECONDS = 25
+
+
 def get_openai_client():
 
     api_key = os.getenv("OPENAI_API_KEY")
@@ -15,7 +18,9 @@ def get_openai_client():
     if not api_key:
         raise ValueError("OPENAI_API_KEY not found in environment variables")
 
-    return OpenAI(api_key=api_key)
+    # A slow call must not hold the request for minutes: the app gives up
+    # after about a minute anyway. Callers do their own (bounded) retries.
+    return OpenAI(api_key=api_key, timeout=OPENAI_TIMEOUT_SECONDS, max_retries=0)
 
 
 # =====================================================

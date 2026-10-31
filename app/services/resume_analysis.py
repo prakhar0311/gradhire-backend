@@ -44,6 +44,8 @@ MAX_RESUME_CHARS = 6000
 MAX_JOB_CHARS = 5000
 MAX_KEYWORDS = 20
 MAX_REWRITE_PASSES = 2
+# A second rewrite pass only starts if the first finished within this time
+SECOND_PASS_BUDGET_SECONDS = 30
 
 # Score weights (out of 100)
 W_KEYWORDS = 40
@@ -1067,8 +1069,11 @@ def optimize(resume_text: str, job_text: str, structure: Optional[dict] = None) 
 
     focus = "Strengthen each bullet and name the job keywords the person already has where they used them."
     passes = 0
+    started = time.monotonic()
 
     for _ in range(MAX_REWRITE_PASSES):
+        if passes and time.monotonic() - started > SECOND_PASS_BUDGET_SECONDS:
+            break
         passes += 1
         rewrite = _rewrite(structure, resume_text, keywords, presence, focus)
         if not rewrite["accepted"]:
