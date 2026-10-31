@@ -33,14 +33,14 @@ from app.services.resume_pdf import RenderError, fit_resume
 #
 # Nothing here falls back to sample or placeholder content.
 
-ANALYSIS_VERSION = "8"
+ANALYSIS_VERSION = "9"
 MODEL = "gpt-4o-mini"
 # Rewriting follows strict rules; this model is set separately so it can
 # be stronger than the one used for extraction and the rubric
 REWRITE_MODEL = "gpt-4o"
 SEED = 7
 
-MAX_RESUME_CHARS = 6000
+MAX_RESUME_CHARS = 12000
 MAX_JOB_CHARS = 5000
 MAX_KEYWORDS = 20
 MAX_REWRITE_PASSES = 2
@@ -272,6 +272,22 @@ def all_bullets(structure: dict) -> List[dict]:
     return found
 
 
+# Section headings: if the resume has one, the structure must have that section
+_SECTION_HEADINGS = {
+    "education": re.compile(r"^\s*(education|academic|academics|qualifications?)\b", re.I | re.M),
+    "experience": re.compile(r"^\s*(experience|work experience|professional experience|internships?|employment)\b", re.I | re.M),
+    "projects": re.compile(r"^\s*(projects?|academic projects|personal projects)\b", re.I | re.M),
+}
+
+
+def _missing_sections(structure: dict, resume_text: str) -> List[str]:
+    """Sections the resume has a heading for but the structure lacks."""
+    return [
+        name for name, heading in _SECTION_HEADINGS.items()
+        if heading.search(resume_text) and not structure.get(name)
+    ]
+
+
 def read_structure(resume_text: str) -> dict:
     key = "structure:" + content_hash(ANALYSIS_VERSION, resume_text)
     cached = _cache_get(key)
@@ -281,16 +297,25 @@ def read_structure(resume_text: str) -> dict:
     last_error = "unreadable"
     for _ in range(2):
         try:
-            parsed = _chat_json(STRUCTURE_PROMPT, f"Resume:\n{resume_text[:MAX_RESUME_CHARS]}", 1800)
+            parsed = _chat_json(STRUCTURE_PROMPT, f"Resume:\n{resume_text[:MAX_RESUME_CHARS]}", 4000)
             structure, _dropped = _validate_structure(parsed, resume_text)
-            if all_bullets(structure) or structure["skills"]:
-                _cache_set(key, structure, 3600)
-                return structure
-            last_error = "no content"
+            if not (all_bullets(structure) or structure["skills"]):
+                last_error = "no content"
+                continue
+            # A section that's in the resume must not quietly vanish from the PDF
+            missing = _missing_sections(structure, resume_text)
+            if missing:
+                last_error = f"missing {', '.join(missing)}"
+                continue
+            _cache_set(key, structure, 3600)
+            return structure
         except Exception as e:
             last_error = type(e).__name__
 
     logging.warning(f"Resume structure failed: {last_error}")
+    if last_error.startswith("missing"):
+        raise AnalysisError("We couldn't read every section of your resume. Please try again; "
+                            "if it keeps happening, try a shorter or simpler PDF.")
     raise AnalysisError("We couldn't read your resume's sections. Please try again.")
 
 
