@@ -409,13 +409,14 @@ async def extract_resume_text(file: UploadFile) -> str:
     if not file.filename.lower().endswith(".pdf"):
         raise HTTPException(400, "Only PDF resumes are allowed")
 
-    content = await file.read()
+    # Read at most one byte past the limit, never the whole upload
+    content = await file.read(MAX_FILE_SIZE + 1)
 
     if not content:
         raise HTTPException(400, "Empty file")
 
     if len(content) > MAX_FILE_SIZE:
-        raise HTTPException(400, "Resume too large")
+        raise HTTPException(400, "This PDF is larger than 5 MB. Upload a smaller file.")
 
     try:
 
@@ -953,10 +954,13 @@ async def download_resume(
     if not job_description.strip():
         raise HTTPException(400, "Missing job description")
 
-    content = await file.read()
+    content = await file.read(MAX_FILE_SIZE + 1)
 
     if not content:
         raise HTTPException(400, "Empty file")
+
+    if len(content) > MAX_FILE_SIZE:
+        raise HTTPException(400, "This PDF is larger than 5 MB. Upload a smaller file.")
 
     try:
         text = ""
