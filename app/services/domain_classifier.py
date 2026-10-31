@@ -1,3 +1,4 @@
+import logging
 import re
 from typing import Dict
 
@@ -187,6 +188,6 @@ def generate_job_query(resume_text: str) -> str:
 
     except Exception as e:
 
-        print("⚠️ Domain classifier error:", str(e))
+        logging.warning(f"Domain classifier failed: {type(e).__name__}")
 
         return QUERY_MAP["general"]

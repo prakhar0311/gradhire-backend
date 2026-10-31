@@ -1,3 +1,4 @@
+import logging
 import os
 import json
 import re
@@ -268,7 +269,8 @@ Job Description:
 
         except Exception as e:
 
-            print(f"❌ OpenAI attempt {attempt+1} failed:", e)
+            # The type only: error text can quote the request
+            logging.warning(f"OpenAI attempt {attempt+1} failed: {type(e).__name__}")
 
     # Final fallback
     return fallback_response(resume_text)

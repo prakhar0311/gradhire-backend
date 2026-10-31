@@ -760,7 +760,7 @@ async def optimize_resume(request: OptimizeRequest):
 
     except Exception as e:
 
-        logging.error(f"Optimize failed: {str(e)}")
+        logging.error(f"Optimize failed: {type(e).__name__}")
 
         raise HTTPException(
             status_code=500,
