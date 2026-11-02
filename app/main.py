@@ -31,6 +31,7 @@ from app.services.ai_optimizer import optimize_resume_ai, resume_to_text
 from app.services.jobs import (
     fetch_jobs,
     compute_match_score,
+    is_match_cached,
     fetch_new_grad_jobs,
     search_new_grad_jobs,
     clean_search_query,
@@ -95,12 +96,16 @@ AI_PER_IP_MINUTE = 15
 AI_PER_IP_DAY = 100
 AI_GLOBAL_PER_DAY = 500    # Hard cap on OpenAI calls per day across all users
 GENERAL_PER_MINUTE = 30    # Other endpoints, per user per minute
+# Matching a resume makes 7 Adzuna calls when it isn't cached
+MATCH_PER_HOUR = 20
+MATCH_PER_DAY = 60
 # Re-scoring a PDF choice (/resume/render) can make two small AI calls
 SCORE_PER_MINUTE = 20
 SCORE_PER_DAY = 300
 SCORE_GLOBAL_PER_DAY = 5000
 
 MINUTE = 60
+HOUR = 60 * 60
 DAY = 24 * 60 * 60
 
 
@@ -209,6 +214,18 @@ def verified_user_id(request: Request) -> Optional[str]:
         return str(verify_user(auth_header[7:].strip()).id)
     except AccountError:
         return None
+
+
+def enforce_match_limits(request: Request, user_id: Optional[str]):
+    """Uncached resume matching, per user (or IP for guests), so the shared
+    Adzuna quota can't be used up by one client."""
+    key = f"user:{user_id}" if user_id else f"ip:{client_ip(request)}"
+    limiter.check([
+        (f"match-hour:{key}", MATCH_PER_HOUR, HOUR,
+         "You've refreshed matches a lot. Please try again in a little while."),
+        (f"match-day:{key}", MATCH_PER_DAY, DAY,
+         "You've reached today's limit for job matching. Please try again tomorrow."),
+    ])
 
 
 def score_allowed(request: Request, user_id: Optional[str]) -> bool:
@@ -641,6 +658,9 @@ async def jobs_from_resume(
 
     query = generate_job_query(text)
 
+    if not is_match_cached(query, country, text):
+        enforce_match_limits(request, await run_in_threadpool(verified_user_id, request))
+
     try:
 
         # fetch_jobs already falls back to generic entry-level queries
@@ -701,10 +721,14 @@ async def jobs_for_resume(
         logging.error(f"Loading resume for matching failed: {type(e).__name__}")
         raise HTTPException(500, "Could not load your matches. Please try again.")
 
+    query = generate_job_query(text)
+    if not is_match_cached(query, body.country, text):
+        enforce_match_limits(request, str(user.id))
+
     try:
 
         fetched = await fetch_jobs(
-            query=generate_job_query(text),
+            query=query,
             country=body.country,
             resume_text=text
         )

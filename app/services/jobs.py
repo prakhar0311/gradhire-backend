@@ -477,6 +477,16 @@ def posted_timestamp(job: dict) -> float:
 # FETCH JOBS (RESUME MATCHING)
 # =====================================================
 
+def match_cache_key(query: str, country: str, limit: int, resume_text: str) -> str:
+    resume_hash = hashlib.sha256(resume_text.encode("utf-8")).hexdigest()
+    return f"match:{country}:{query}:{limit}:{resume_hash}"
+
+
+def is_match_cached(query: str, country: str, resume_text: str) -> bool:
+    """True when fetch_jobs would answer from the cache (no Adzuna calls)."""
+    return cache_get(match_cache_key(query, country, MAX_JOBS_RETURNED, resume_text)) is not None
+
+
 async def fetch_jobs(
     query: str,
     country: str = "in",
@@ -488,8 +498,7 @@ async def fetch_jobs(
         logging.error("Missing Adzuna API keys")
         raise AdzunaUnavailable()
 
-    resume_hash = hashlib.sha256(resume_text.encode("utf-8")).hexdigest()
-    cache_key = f"match:{country}:{query}:{limit}:{resume_hash}"
+    cache_key = match_cache_key(query, country, limit, resume_text)
 
     cached = cache_get(cache_key)
 
