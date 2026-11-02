@@ -93,6 +93,10 @@ AI_PER_IP_MINUTE = 15
 AI_PER_IP_DAY = 100
 AI_GLOBAL_PER_DAY = 500    # Hard cap on OpenAI calls per day across all users
 GENERAL_PER_MINUTE = 30    # Other endpoints, per user per minute
+# Re-scoring a PDF choice (/resume/render) can make two small AI calls
+SCORE_PER_MINUTE = 20
+SCORE_PER_DAY = 300
+SCORE_GLOBAL_PER_DAY = 5000
 
 MINUTE = 60
 DAY = 24 * 60 * 60
@@ -203,6 +207,21 @@ def verified_user_id(request: Request) -> Optional[str]:
         return str(verify_user(auth_header[7:].strip()).id)
     except AccountError:
         return None
+
+
+def score_allowed(request: Request, user_id: Optional[str]) -> bool:
+    """Whether a rendered PDF may be re-scored. Over the limit, the PDF is
+    still returned, just without a fresh score."""
+    key = f"user:{user_id}" if user_id else f"ip:{client_ip(request)}"
+    try:
+        limiter.check([
+            (f"score-min:{key}", SCORE_PER_MINUTE, MINUTE, ""),
+            (f"score-day:{key}", SCORE_PER_DAY, DAY, ""),
+            ("score-global-day", SCORE_GLOBAL_PER_DAY, DAY, ""),
+        ])
+        return True
+    except HTTPException:
+        return False
 
 
 def enforce_general_limits(request: Request):
@@ -1051,7 +1070,7 @@ def _score_choice(resume: dict, job_description: str, include: Optional[dict]) -
 
 
 @app.post("/resume/render", dependencies=[Depends(enforce_general_limits)])
-async def render_resume_endpoint(body: RenderRequest):
+async def render_resume_endpoint(request: Request, body: RenderRequest):
 
     if len(json.dumps(body.resume)) > MAX_RENDER_JSON:
         raise HTTPException(413, "This resume is too large to render.")
@@ -1079,7 +1098,8 @@ async def render_resume_endpoint(body: RenderRequest):
         raise HTTPException(500, "Couldn't create the PDF. Please try again.")
 
     score = None
-    if include is not None and body.job_description and len(body.job_description.strip()) >= 60:
+    if include is not None and body.job_description and len(body.job_description.strip()) >= 60 \
+            and score_allowed(request, await run_in_threadpool(verified_user_id, request)):
         try:
             score = await run_in_threadpool(_score_choice, resume, body.job_description, include)
         except Exception as e:
