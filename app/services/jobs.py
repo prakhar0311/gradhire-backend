@@ -12,6 +12,8 @@ from typing import Dict, List, Optional, Tuple
 import httpx
 from dotenv import load_dotenv
 
+from app.services import fresher_ai
+from app.services.fresher import assess, dedupe, is_broken, is_senior_title  # noqa: F401 (used by tests)
 from app.services.skills import extract_skills, skill_gap
 
 load_dotenv()
@@ -41,6 +43,8 @@ SEARCH_CACHE_TTL = 5 * 60
 SEARCH_CACHE_MAX_ENTRIES = 200
 SEARCH_ADZUNA_PAGE_SIZE = 50
 SEARCH_MAX_ADZUNA_PAGES = 5
+# Pages of "query + any fresher word" read before the plain query
+SEARCH_FRESHER_PAGES = 2
 SEARCH_QUERY_MIN_LENGTH = 2
 SEARCH_QUERY_MAX_LENGTH = 100
 SEARCH_RETRY_IF_FASTER_THAN = 3.0
@@ -82,53 +86,11 @@ TECH_KEYWORDS = {
 
 
 # =====================================================
-# ENTRY LEVEL KEYWORDS
+# FRESHER FILTER (CORE OF GRADHIRE)
 # =====================================================
-
-ENTRY_LEVEL_KEYWORDS = {
-
-    "junior",
-    "entry",
-    "graduate",
-    "new grad",
-    "fresher",
-    "intern",
-    "internship",
-    "trainee",
-    "associate",
-    "campus"
-}
-
-
-# =====================================================
-# SENIOR BLOCKLIST (STRICT)
-# =====================================================
-
-SENIOR_BLOCKLIST = {
-
-    "senior",
-    "sr",
-    "lead",
-    "principal",
-    "staff",
-    "manager",
-    "architect",
-    "director",
-    "head",
-    "vp",
-    "avp",
-    "vice",
-    "ii",
-    "iii",
-    "iv"
-}
-
-# Whole words only, so "leadership" or "ahead" don't trip it. Letter
-# boundaries (not \b) so "IN_Sr Associate" or "Lead/Manager" still match.
-SENIOR_TITLE_PATTERN = re.compile(
-    r"(?<![a-z])(" + "|".join(sorted(SENIOR_BLOCKLIST)) + r")(?![a-z])",
-    re.IGNORECASE
-)
+# The rules live in fresher.py; jobs they can't decide go to the AI check
+# in fresher_ai.py. Every list (For You, All Jobs, search) goes through
+# keep_fresher_jobs.
 
 # Searched in job titles (Adzuna's title_only takes one term per request).
 NEW_GRAD_TITLE_KEYWORDS = [
@@ -138,12 +100,59 @@ NEW_GRAD_TITLE_KEYWORDS = [
     "junior",
     "trainee",
     "new grad",
-    "associate"
+    "associate",
+    "intern",
+    "campus"
 ]
+
+# Adzuna's what_or: any of these words. Paired with a role in `what`, it
+# finds that role's fresher postings.
+FRESHER_WORDS = "fresher freshers junior trainee graduate graduates intern entry"
 
 # Note: Adzuna's what_exclude also matches descriptions ("lead the team",
 # "report to manager") and drops ~80% of valid roles, so seniority is
-# filtered on titles only via SENIOR_TITLE_PATTERN.
+# filtered on titles and parsed requirements instead.
+
+
+def is_entry_level(title: str, description: str, company: str = "") -> bool:
+    """False for jobs the rules exclude (unclear ones count as entry level)."""
+    return assess(title, description, company).status != "exclude"
+
+
+async def keep_fresher_jobs(jobs: List[dict], wait: float = fresher_ai.WAIT_SECONDS,
+                            seen: Optional[List[dict]] = None) -> List[dict]:
+    """The jobs (build_job shape, in order) that suit a fresher, each with
+    minYears and batches for the app's label. Broken listings and
+    duplicates (also of `seen`, e.g. earlier pages) are dropped too."""
+
+    kept, unclear = [], []
+
+    for job in jobs:
+        if is_broken(job):
+            continue
+        assessment = assess(job["title"], job["description"], job["company"])
+        if assessment.status == "exclude":
+            continue
+        job["minYears"] = assessment.min_years
+        job["batches"] = assessment.batches
+        kept.append(job)
+        if assessment.status == "unclear":
+            unclear.append(job)
+
+    if unclear:
+        results = await fresher_ai.classify(unclear, wait=wait)
+        for job in unclear:
+            result = results.get(job["id"])
+            if result is None:
+                continue
+            if fresher_ai.excludes(result):
+                job["_drop"] = True
+            else:
+                job["minYears"] = result["min_years"]
+                job["batches"] = result["batches"]
+        kept = [job for job in kept if not job.pop("_drop", False)]
+
+    return dedupe(kept, list(seen) if seen is not None else None)
 
 
 # =====================================================
@@ -161,71 +170,6 @@ def tokenize(text: str):
         w for w in words
         if w not in STOPWORDS and len(w) > 2
     }
-
-
-# =====================================================
-# EXPERIENCE DETECTOR
-# =====================================================
-
-def extract_required_experience(text: str):
-
-    matches = re.findall(r"(\d+)\+?\s*(?:years|yrs)", text.lower())
-
-    if not matches:
-        return 0
-
-    try:
-        return min(int(x) for x in matches)
-    except:
-        return 0
-
-
-# =====================================================
-# ENTRY LEVEL FILTER (CORE OF GRADHIRE)
-# =====================================================
-
-def extract_years(text: str):
-
-    matches = re.findall(r"(\d+)\+?\s*(?:years|yrs)", text.lower())
-
-    if not matches:
-        return None   # Important change
-
-    try:
-        return min(int(x) for x in matches)
-    except:
-        return None
-
-
-def is_senior_title(title: str) -> bool:
-
-    return bool(SENIOR_TITLE_PATTERN.search(title or ""))
-
-
-def is_entry_level(title: str, description: str):
-
-    text = f"{title} {description}".lower()
-
-    # Always block senior roles (judged on the title only)
-    if is_senior_title(title):
-        return False
-
-    years = extract_years(text)
-
-    # If experience explicitly mentioned and >2 → reject
-    if years is not None and years > 2:
-        return False
-
-    # If explicitly entry-level → accept
-    if any(word in text for word in ENTRY_LEVEL_KEYWORDS):
-        return True
-
-    # If no experience mentioned → assume entry-level (REAL-WORLD FIX)
-    if years is None:
-        return True
-
-    # If <=2 years → accept
-    return years <= 2
 
 
 # =====================================================
@@ -505,32 +449,28 @@ async def fetch_jobs(
     if cached is not None:
         return cached
 
-    # Multiple fallback queries, fetched in parallel
-    queries = [
-
-        query,
-
-        "software engineer",
-
-        "software developer",
-
-        "junior software engineer",
-
-        "fresher software engineer",
-
-        "graduate software engineer",
-
-        "entry level software engineer"
+    # The resume's role ("junior backend developer"), the same role with
+    # any fresher word, then general fresher software roles; all in IT jobs
+    role = re.sub(r"^junior\s+", "", query)
+    searches = [
+        {"what": query},
+        {"what": role, "what_or": FRESHER_WORDS},
+        {"what": "fresher software engineer"},
+        {"what": "graduate software engineer"},
+        {"what": "trainee software engineer"},
+        {"what": "entry level software developer"},
+        {"what": "junior software developer"},
     ]
 
     param_sets = [
         {
-            "what": q,
+            **search,
+            "category": "it-jobs",
             "results_per_page": 50,
             "max_days_old": MATCH_MAX_DAYS_OLD,
             "sort_by": "date"
         }
-        for q in queries
+        for search in searches
     ]
 
     batches = await gather_searches(country, param_sets)
@@ -554,7 +494,8 @@ async def fetch_jobs(
             if redirect_url in seen_urls:
                 continue
 
-            if not is_entry_level(title, description_raw):
+            # Cheap rules first; the AI check runs on the best matches only
+            if not is_entry_level(title, description_raw, (job.get("company") or {}).get("display_name") or ""):
                 continue
 
             score = compute_match_score(
@@ -578,7 +519,8 @@ async def fetch_jobs(
         reverse=True
     )
 
-    jobs = collected_jobs[:limit]
+    # Enough candidates that excluded ones still leave a full list
+    jobs = (await keep_fresher_jobs(collected_jobs[:limit * 3]))[:limit]
 
     cache_set(cache_key, jobs, MATCH_CACHE_TTL)
 
@@ -628,9 +570,6 @@ async def load_new_grad_feed(country: str) -> List[dict]:
             if not job.get("redirect_url"):
                 continue
 
-            if is_senior_title(job.get("title") or ""):
-                continue
-
             built = build_job(job, None)
 
             if built["id"] in seen_ids:
@@ -640,6 +579,7 @@ async def load_new_grad_feed(country: str) -> List[dict]:
             feed.append(built)
 
     feed.sort(key=posted_timestamp, reverse=True)
+    feed = await keep_fresher_jobs(feed)
 
     cache_set(cache_key, feed, NEW_GRAD_CACHE_TTL)
 
@@ -699,7 +639,8 @@ class _SearchState:
     def __init__(self):
         self.jobs: List[dict] = []
         self.seen_ids = set()
-        self.seen_postings = set()
+        # Fresher postings of the query first, then the plain query
+        self.phase = 0
         self.next_page = 1
         self.exhausted = False
         self.expires_at = time.time() + SEARCH_CACHE_TTL
@@ -734,6 +675,8 @@ async def _fetch_next_search_page(country: str, query: str, max_days: int, state
         "max_days_old": max_days,
         "results_per_page": SEARCH_ADZUNA_PAGE_SIZE
     }
+    if state.phase == 0:
+        params["what_or"] = FRESHER_WORDS
 
     results = None
 
@@ -763,21 +706,16 @@ async def _fetch_next_search_page(country: str, query: str, max_days: int, state
         if not job.get("redirect_url"):
             continue
 
-        # Same new-grad rules as resume matching: no senior titles, <=2 years
-        if not is_entry_level(job.get("title") or "", job.get("description") or ""):
-            continue
-
         built = build_job(job, None)
 
-        # The same opening is often posted many times under different ids
-        posting = (built["title"].lower(), built["company"].lower(), built["location"].lower())
-
-        if built["id"] in state.seen_ids or posting in state.seen_postings:
+        if built["id"] in state.seen_ids:
             continue
 
         state.seen_ids.add(built["id"])
-        state.seen_postings.add(posting)
         batch.append(built)
+
+    # Same fresher rules as matching; duplicates of earlier pages are dropped
+    batch = await keep_fresher_jobs(batch, seen=state.jobs)
 
     # Within each batch: title matches first, then company matches, newest first
     def rank(job: dict):
@@ -796,8 +734,12 @@ async def _fetch_next_search_page(country: str, query: str, max_days: int, state
     state.jobs.extend(sorted(batch, key=rank))
     state.next_page += 1
 
-    if len(results) < SEARCH_ADZUNA_PAGE_SIZE or state.next_page > SEARCH_MAX_ADZUNA_PAGES:
-        state.exhausted = True
+    max_pages = SEARCH_FRESHER_PAGES if state.phase == 0 else SEARCH_MAX_ADZUNA_PAGES
+    if len(results) < SEARCH_ADZUNA_PAGE_SIZE or state.next_page > max_pages:
+        if state.phase == 0:
+            state.phase, state.next_page = 1, 1
+        else:
+            state.exhausted = True
 
     return True
 

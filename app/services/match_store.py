@@ -4,6 +4,8 @@ from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional
 
 from app.services.account import verify_user, AccountError
+from app.services.fresher import assess
+from app.services.fresher_ai import excludes
 from app.services.job_store import save_served_jobs
 from app.services.supabase_client import get_supabase
 
@@ -107,6 +109,12 @@ def save_matches(access_token: str, resume_id: str, jobs: List[dict]) -> None:
         cutoff = (datetime.now(timezone.utc) - timedelta(days=MATCH_MAX_AGE_DAYS)).isoformat()
         client.table("job_matches").delete().eq("resume_id", resume_id).lt("created_at", cutoff).execute()
 
+        # Matches stored before the fresher filter changed: drop the ones it
+        # now excludes, so For You only lists suitable jobs
+        unsuitable = _unsuitable_stored_matches(client, resume_id)
+        if unsuitable:
+            client.table("job_matches").delete().eq("resume_id", resume_id).in_("job_id", unsuitable).execute()
+
         stored = (
             client.table("job_matches")
             .select("match_score")
@@ -120,6 +128,24 @@ def save_matches(access_token: str, resume_id: str, jobs: List[dict]) -> None:
 
     except Exception as e:
         logging.warning(f"Saving matches failed: {type(e).__name__}")
+
+
+def _unsuitable_stored_matches(client, resume_id: str) -> List[str]:
+    rows = (
+        client.table("job_matches")
+        .select("job_id,jobs(title,company,description,fresher_friendly,fresher_confidence)")
+        .eq("resume_id", resume_id)
+        .execute()
+        .data
+    )
+    unsuitable = []
+    for row in rows:
+        job = row.get("jobs") or {}
+        if assess(job.get("title") or "", job.get("description") or "", job.get("company") or "").status == "exclude" \
+                or excludes({"fresher": job.get("fresher_friendly"), "confidence": job.get("fresher_confidence") or 0}
+                            if job.get("fresher_friendly") is not None else None):
+            unsuitable.append(row["job_id"])
+    return unsuitable
 
 
 def load_resume_for_matching(user_id: str, resume_id: str):
