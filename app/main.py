@@ -643,7 +643,8 @@ async def supabase_health():
     result = await run_in_threadpool(check_connection)
 
     if not result["ok"]:
-        raise HTTPException(503, f"Supabase: {result['reason']}")
+        # The reason (e.g. an invalid key) is in the logs, not the response
+        raise HTTPException(503, "Supabase is unreachable.")
 
     return {"supabase": "ok", "jobs_table": "reachable"}
 
