@@ -15,7 +15,7 @@ load_dotenv()
 from fastapi import FastAPI, UploadFile, File, Query, HTTPException, Form, Request, Depends, BackgroundTasks
 from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field
-from typing import List, Optional
+from typing import Annotated, List, Optional
 
 import pdfplumber
 import io
@@ -350,8 +350,8 @@ class EnsureJobRequest(BaseModel):
 
 
 class ScoreRequest(BaseModel):
-    job_description: str = Field(..., min_length=1)
-    resume_texts: List[str] = Field(..., min_length=1, max_length=4)
+    job_description: str = Field(..., min_length=1, max_length=20000)
+    resume_texts: List[Annotated[str, Field(max_length=30000)]] = Field(..., min_length=1, max_length=4)
 
 
 # =====================================================
@@ -1034,12 +1034,11 @@ async def score_resumes(request: ScoreRequest):
 
     # compute_match_score is the exact function used when matching jobs,
     # so "before" and "after" are scored identically.
-    return {
-        "scores": [
-            compute_match_score(text, request.job_description)
-            for text in request.resume_texts
-        ]
-    }
+    # CPU work: off the event loop
+    def scores():
+        return [compute_match_score(text, request.job_description) for text in request.resume_texts]
+
+    return {"scores": await run_in_threadpool(scores)}
 
 
 # =====================================================
@@ -1153,11 +1152,25 @@ def _score_choice(resume: dict, job_description: str, include: Optional[dict]) -
     return score
 
 
+RESUME_TEXT_FIELDS = ("name", "contact", "summary", "phone", "email", "linkedin", "github", "portfolio", "city")
+RESUME_LIST_FIELDS = ("skills", "experience", "projects", "education", "certifications", "achievements")
+
+
+def _is_well_formed(resume: dict) -> bool:
+    """Text fields are text and sections are lists (a wrong type is the
+    client's mistake: a 422, not a 500)."""
+    return all(resume.get(f) is None or isinstance(resume[f], str) for f in RESUME_TEXT_FIELDS) \
+        and all(resume.get(f) is None or isinstance(resume[f], list) for f in RESUME_LIST_FIELDS)
+
+
 @app.post("/resume/render", dependencies=[Depends(enforce_general_limits)])
 async def render_resume_endpoint(request: Request, body: RenderRequest):
 
     if len(json.dumps(body.resume)) > MAX_RENDER_JSON:
         raise HTTPException(413, "This resume is too large to render.")
+
+    if not _is_well_formed(body.resume):
+        raise HTTPException(422, "This resume couldn't be read. Please optimize it again.")
 
     include = body.include
     if include is not None:
