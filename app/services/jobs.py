@@ -303,9 +303,26 @@ def cache_get(key: str, allow_stale: bool = False):
     return None
 
 
+# One entry per distinct resume; without a cap these would pile up forever.
+# Feed entries are kept even when stale (they're the fallback when Adzuna
+# fails), so only match entries are evicted.
+MATCH_CACHE_MAX_ENTRIES = 300
+
+
 def cache_set(key: str, value, ttl: int):
 
     _cache[key] = (time.time() + ttl, value)
+
+    match_keys = [k for k in _cache if k.startswith("match:")]
+    if len(match_keys) > MATCH_CACHE_MAX_ENTRIES:
+        now = time.time()
+        expired = [k for k in match_keys if _cache[k][0] <= now]
+        for k in expired:
+            del _cache[k]
+        # Still too many: drop the oldest (dicts keep insertion order)
+        live = [k for k in match_keys if k in _cache]
+        for k in live[:len(live) - MATCH_CACHE_MAX_ENTRIES]:
+            del _cache[k]
 
 
 # =====================================================
