@@ -17,6 +17,12 @@ from app.services.apple_auth import revoke_with_authorization_code
 
 RESUMES_BUCKET = "resumes"
 STORAGE_PAGE_SIZE = 100
+# The app stores files directly in the user's folder; subfolders are
+# followed this deep in case any were made some other way
+MAX_FOLDER_DEPTH = 5
+# Bounded, so a file that can't be removed fails the request instead of
+# looping forever
+MAX_DELETE_PASSES = 5
 
 
 class AccountError(Exception):
@@ -46,21 +52,45 @@ def verify_user(access_token: str):
     return response.user
 
 
+def _file_paths(bucket, folder: str, depth: int = 0) -> list:
+    """Every file under folder, including subfolders (listed without an id)."""
+
+    paths = []
+    offset = 0
+
+    while True:
+        items = bucket.list(folder, {"limit": STORAGE_PAGE_SIZE, "offset": offset})
+        for item in items:
+            name = item.get("name")
+            if not name:
+                continue
+            if item.get("id") is None:
+                if depth < MAX_FOLDER_DEPTH:
+                    paths += _file_paths(bucket, f"{folder}/{name}", depth + 1)
+            else:
+                paths.append(f"{folder}/{name}")
+        if len(items) < STORAGE_PAGE_SIZE:
+            return paths
+        offset += STORAGE_PAGE_SIZE
+
+
 def delete_user_files(user_id: str) -> int:
     """Deletes every file in the user's folder. Returns how many were removed."""
 
     bucket = get_supabase().storage.from_(RESUMES_BUCKET)
     removed = 0
 
-    while True:
-        items = bucket.list(user_id, {"limit": STORAGE_PAGE_SIZE, "offset": 0})
-        paths = [f"{user_id}/{item['name']}" for item in items if item.get("name")]
+    for _ in range(MAX_DELETE_PASSES):
+        paths = _file_paths(bucket, user_id)
 
         if not paths:
             return removed
 
-        bucket.remove(paths)
+        for start in range(0, len(paths), STORAGE_PAGE_SIZE):
+            bucket.remove(paths[start:start + STORAGE_PAGE_SIZE])
         removed += len(paths)
+
+    raise RuntimeError("files remain after deleting")
 
 
 def delete_account(access_token: str, apple_authorization_code: Optional[str]) -> dict:
