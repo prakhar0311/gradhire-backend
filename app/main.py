@@ -23,6 +23,7 @@ import re
 import json
 import time
 import logging
+import threading
 from collections import defaultdict, deque
 from contextlib import asynccontextmanager
 
@@ -102,6 +103,8 @@ class RateLimiter:
     def __init__(self):
         self._hits = defaultdict(deque)
         self._calls = 0
+        # Sync dependencies run in the thread pool, so checks can overlap
+        self._lock = threading.Lock()
 
     def _prune(self, key, window, now):
         hits = self._hits[key]
@@ -112,18 +115,19 @@ class RateLimiter:
     def check(self, rules):
         """rules: [(key, limit, window, message)]. Records a hit only if every
         rule passes; otherwise raises 429 with the first failing rule's message."""
-        now = time.monotonic()
+        with self._lock:
+            now = time.monotonic()
 
-        for key, limit, window, message in rules:
-            if len(self._prune(key, window, now)) >= limit:
-                raise HTTPException(429, message)
+            for key, limit, window, message in rules:
+                if len(self._prune(key, window, now)) >= limit:
+                    raise HTTPException(429, message)
 
-        for key, _, _, _ in rules:
-            self._hits[key].append(now)
+            for key, _, _, _ in rules:
+                self._hits[key].append(now)
 
-        self._calls += 1
-        if self._calls % 1000 == 0:
-            self._cleanup(now)
+            self._calls += 1
+            if self._calls % 1000 == 0:
+                self._cleanup(now)
 
     def _cleanup(self, now):
         # Drop idle keys so memory doesn't grow with every IP ever seen

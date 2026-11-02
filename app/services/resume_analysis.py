@@ -2,6 +2,7 @@ import hashlib
 import json
 import logging
 import re
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, List, Optional, Tuple
@@ -68,6 +69,8 @@ class AnalysisError(Exception):
 
 _cache: Dict[str, Tuple[float, object]] = {}
 _CACHE_MAX = 500
+# Analyses run in the thread pool; eviction must not race with other writes
+_cache_lock = threading.Lock()
 
 
 def _cache_get(key: str):
@@ -78,13 +81,14 @@ def _cache_get(key: str):
 
 
 def _cache_set(key: str, value, ttl: int):
-    if len(_cache) >= _CACHE_MAX:
-        now = time.time()
-        for k in [k for k, (expires, _) in _cache.items() if expires <= now]:
-            _cache.pop(k, None)
-        while len(_cache) >= _CACHE_MAX:
-            _cache.pop(next(iter(_cache)))
-    _cache[key] = (time.time() + ttl, value)
+    with _cache_lock:
+        if len(_cache) >= _CACHE_MAX:
+            now = time.time()
+            for k in [k for k, (expires, _) in _cache.items() if expires <= now]:
+                _cache.pop(k, None)
+            while len(_cache) >= _CACHE_MAX:
+                _cache.pop(next(iter(_cache)))
+        _cache[key] = (time.time() + ttl, value)
 
 
 def content_hash(*parts: str) -> str:
