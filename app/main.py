@@ -24,6 +24,7 @@ import json
 import time
 import logging
 from collections import defaultdict, deque
+from contextlib import asynccontextmanager
 
 from app.services.ai_optimizer import optimize_resume_ai, resume_to_text
 from app.services.jobs import (
@@ -51,10 +52,17 @@ from fastapi.middleware.cors import CORSMiddleware
 # APP CONFIG
 # =====================================================
 
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    yield
+    await close_client()
+
+
 app = FastAPI(
     title="GradHire API",
     description="AI-powered resume optimization and job matching backend",
-    version="1.0.0"
+    version="1.0.0",
+    lifespan=lifespan
 )
 
 # CORS CONFIG
@@ -65,10 +73,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-@app.on_event("shutdown")
-async def shutdown():
-    await close_client()
 
 
 MAX_FILE_SIZE = 5 * 1024 * 1024
