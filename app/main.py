@@ -53,8 +53,26 @@ from app.services import resume_analysis, analysis_store
 # APP CONFIG
 # =====================================================
 
+# Without these the app can't serve its main features; refusing to start
+# makes a bad deploy fail (Render keeps the previous version running)
+# instead of failing mid-request later.
+REQUIRED_ENV = ("SUPABASE_URL", "SUPABASE_SECRET_KEY", "OPENAI_API_KEY", "ADZUNA_APP_ID", "ADZUNA_API_KEY")
+# Only account deletion's Apple token revocation needs these
+OPTIONAL_ENV = ("APPLE_TEAM_ID", "APPLE_CLIENT_ID", "APPLE_SIGNIN_KEY_ID", "APPLE_SIGNIN_PRIVATE_KEY")
+
+
+def check_environment():
+    missing = [name for name in REQUIRED_ENV if not os.getenv(name)]
+    if missing:
+        raise RuntimeError(f"Missing required environment variables: {', '.join(missing)}")
+    missing_optional = [name for name in OPTIONAL_ENV if not os.getenv(name)]
+    if missing_optional:
+        logging.warning(f"Apple token revocation disabled; missing: {', '.join(missing_optional)}")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    check_environment()
     yield
     await close_client()
 
