@@ -431,7 +431,7 @@ async def gather_searches(country: str, param_sets: List[dict]) -> List[List[dic
 
 def stable_job_id(job: dict) -> str:
 
-    source = str(job.get("id") or job.get("redirect_url", ""))
+    source = str(job.get("id") or job.get("redirect_url") or "")
 
     return str(uuid.uuid5(JOB_ID_NAMESPACE, source))
 
@@ -442,21 +442,22 @@ def build_job(job: dict, match_score: Optional[int]) -> dict:
 
         "id": stable_job_id(job),
 
-        "title": job.get("title", ""),
+        "title": job.get("title") or "",
 
+        # Adzuna sometimes sends null for these
         "company":
-        job.get("company", {})
-        .get("display_name", "Unknown"),
+        (job.get("company") or {})
+        .get("display_name") or "Unknown",
 
         "location":
-        job.get("location", {})
-        .get("display_name", "Remote"),
+        (job.get("location") or {})
+        .get("display_name") or "Remote",
 
-        "description": clean_description(job.get("description", "")),
+        "description": clean_description(job.get("description") or ""),
 
         "matchScore": match_score,
 
-        "applyURL": job.get("redirect_url", ""),
+        "applyURL": job.get("redirect_url") or "",
 
         "postedAt": job.get("created"),
 
@@ -534,9 +535,9 @@ async def fetch_jobs(
 
         for job in results:
 
-            title = job.get("title", "")
-            description_raw = job.get("description", "")
-            redirect_url = job.get("redirect_url", "")
+            title = job.get("title") or ""
+            description_raw = job.get("description") or ""
+            redirect_url = job.get("redirect_url") or ""
 
             if not redirect_url:
                 continue
@@ -618,7 +619,7 @@ async def load_new_grad_feed(country: str) -> List[dict]:
             if not job.get("redirect_url"):
                 continue
 
-            if is_senior_title(job.get("title", "")):
+            if is_senior_title(job.get("title") or ""):
                 continue
 
             built = build_job(job, None)
@@ -754,7 +755,7 @@ async def _fetch_next_search_page(country: str, query: str, max_days: int, state
             continue
 
         # Same new-grad rules as resume matching: no senior titles, <=2 years
-        if not is_entry_level(job.get("title", ""), job.get("description", "")):
+        if not is_entry_level(job.get("title") or "", job.get("description") or ""):
             continue
 
         built = build_job(job, None)
