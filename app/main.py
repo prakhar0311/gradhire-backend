@@ -77,6 +77,8 @@ app.add_middleware(
 
 
 MAX_FILE_SIZE = 5 * 1024 * 1024
+# A resume is a page or two; longer PDFs are read only this far
+MAX_PDF_PAGES = 10
 ALLOWED_COUNTRIES = {"in", "us"}
 ALLOWED_MAX_DAYS = {1, 3, 7, 30}
 
@@ -464,6 +466,32 @@ async def extract_resume_text(file: UploadFile) -> str:
     if len(content) > MAX_FILE_SIZE:
         raise HTTPException(400, "This PDF is larger than 5 MB. Upload a smaller file.")
 
+    # Parsing is CPU work: keep it off the event loop so one PDF can't
+    # stall every other request
+    text = await run_in_threadpool(read_pdf_text, content)
+
+    # Almost no text: a scanned image or a photo of a resume
+    if len(text.split()) < 15:
+        raise HTTPException(
+            400,
+            "This PDF looks like a scanned image, so its text can't be read. "
+            "Export your resume as a text-based PDF (for example from Word or Google Docs) and try again."
+        )
+
+    if not is_valid_resume(text):
+
+        raise HTTPException(
+            400,
+            "This document does not appear to be a resume"
+        )
+
+    return text
+
+
+def read_pdf_text(content: bytes) -> str:
+    """The text of the first MAX_PDF_PAGES pages. Raises a 400 with a clear
+    message for unreadable or password-protected files."""
+
     try:
 
         text = ""
@@ -473,7 +501,7 @@ async def extract_resume_text(file: UploadFile) -> str:
             if len(pdf.pages) == 0:
                 raise HTTPException(400, "Invalid PDF")
 
-            for page in pdf.pages:
+            for page in pdf.pages[:MAX_PDF_PAGES]:
 
                 extracted = page.extract_text()
 
@@ -494,21 +522,6 @@ async def extract_resume_text(file: UploadFile) -> str:
             raise HTTPException(400, "This PDF is password-protected. Remove the password and upload it again.")
 
         raise HTTPException(400, "Invalid PDF file")
-
-    # Almost no text: a scanned image or a photo of a resume
-    if len(text.split()) < 15:
-        raise HTTPException(
-            400,
-            "This PDF looks like a scanned image, so its text can't be read. "
-            "Export your resume as a text-based PDF (for example from Word or Google Docs) and try again."
-        )
-
-    if not is_valid_resume(text):
-
-        raise HTTPException(
-            400,
-            "This document does not appear to be a resume"
-        )
 
     return text
 
@@ -971,17 +984,7 @@ async def download_resume(
     if len(content) > MAX_FILE_SIZE:
         raise HTTPException(400, "This PDF is larger than 5 MB. Upload a smaller file.")
 
-    try:
-        text = ""
-        with pdfplumber.open(io.BytesIO(content)) as pdf:
-            for page in pdf.pages:
-                extracted = page.extract_text()
-                if extracted:
-                    text += extracted + "\n"
-        resume_text = text.strip()
-    except Exception as e:
-        logging.error(f"PDF extraction failed: {type(e).__name__}")
-        raise HTTPException(400, "Could not read the PDF file")
+    resume_text = (await run_in_threadpool(read_pdf_text, content)).strip()
 
     if not resume_text:
         raise HTTPException(400, "Could not extract text from PDF")
