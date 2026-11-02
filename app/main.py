@@ -47,7 +47,6 @@ from app.services.account import delete_account, verify_user, AccountError
 from app.services.job_store import save_served_jobs, ensure_job, JobStoreError
 from app.services.match_store import save_matches, load_resume_for_matching, MatchStoreError
 from app.services import resume_analysis, analysis_store
-from fastapi.middleware.cors import CORSMiddleware
 
 
 # =====================================================
@@ -67,14 +66,72 @@ app = FastAPI(
     lifespan=lifespan
 )
 
-# CORS CONFIG
-app.add_middleware(
-    CORSMiddleware,
-    allow_origin_regex=r"https://.*\.lovable\.app",
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# =====================================================
+# REQUEST SIZE LIMIT
+# =====================================================
+# Bodies are otherwise read in full before any endpoint check (multipart
+# uploads included). The largest real request is a 5 MB PDF upload.
+
+MAX_BODY_BYTES = 6 * 1024 * 1024
+
+
+class BodyTooLarge(Exception):
+    pass
+
+
+class BodySizeLimit:
+
+    def __init__(self, app, max_bytes: int):
+        self.app = app
+        self.max_bytes = max_bytes
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            return await self.app(scope, receive, send)
+
+        headers = dict(scope.get("headers") or [])
+        try:
+            declared = int(headers.get(b"content-length", b"0"))
+        except ValueError:
+            declared = 0
+        if declared > self.max_bytes:
+            return await self._reject(send)
+
+        # No (or a false) Content-Length: count what actually arrives
+        received = 0
+        started = False
+
+        async def limited_receive():
+            nonlocal received
+            message = await receive()
+            if message["type"] == "http.request":
+                received += len(message.get("body", b""))
+                if received > self.max_bytes:
+                    raise BodyTooLarge()
+            return message
+
+        async def tracking_send(message):
+            nonlocal started
+            if message["type"] == "http.response.start":
+                started = True
+            await send(message)
+
+        try:
+            await self.app(scope, limited_receive, tracking_send)
+        except BodyTooLarge:
+            if not started:
+                await self._reject(send)
+
+    @staticmethod
+    async def _reject(send):
+        body = b'{"detail":"This request is too large."}'
+        await send({"type": "http.response.start", "status": 413,
+                    "headers": [(b"content-type", b"application/json"),
+                                (b"content-length", str(len(body)).encode())]})
+        await send({"type": "http.response.body", "body": body})
+
+
+app.add_middleware(BodySizeLimit, max_bytes=MAX_BODY_BYTES)
 
 
 MAX_FILE_SIZE = 5 * 1024 * 1024
