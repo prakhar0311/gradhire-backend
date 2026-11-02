@@ -105,7 +105,7 @@ def job_row(job: dict) -> Optional[dict]:
     if external_id is None:
         return None
 
-    return {
+    row = {
         "id": job_id.lower(),
         "source": SOURCE,
         "external_id": external_id,
@@ -116,6 +116,17 @@ def job_row(job: dict) -> Optional[dict]:
         "apply_url": apply_url,
         "posted_at": _posted_at(job.get("postedAt")),
     }
+
+    # The experience label the app shows, when the fresher filter found one.
+    # Only sent when known, so a later serve can't blank a stored value.
+    min_years = job.get("minYears")
+    if isinstance(min_years, (int, float)) and not isinstance(min_years, bool) and 0 <= min_years <= 15:
+        row["min_years"] = round(float(min_years), 1)
+    batches = job.get("batches")
+    if isinstance(batches, list) and batches:
+        row["grad_batches"] = [b for b in batches if isinstance(b, int) and 2020 <= b <= 2035][:6]
+
+    return row
 
 
 # =====================================================
@@ -156,23 +167,101 @@ def save_served_jobs(jobs: Iterable[dict], is_new_grad: bool = False) -> int:
         return 0
 
     # Every row in one request must have the same columns
+    groups: Dict[tuple, List[dict]] = {}
+    for row in rows:
+        groups.setdefault(tuple(sorted(row)), []).append(row)
+    batches = [group[start:start + UPSERT_BATCH]
+               for group in groups.values() for start in range(0, len(group), UPSERT_BATCH)]
+
     sent = 0
+    saved_ids = set()
     try:
-        for start in range(0, len(rows), UPSERT_BATCH):
-            batch = rows[start:start + UPSERT_BATCH]
+        for batch in batches:
             client.table("jobs").upsert(
                 batch,
                 on_conflict="source,external_id"
             ).execute()
             sent += len(batch)
+            saved_ids.update(row["id"] for row in batch)
     except Exception as e:
         # Forget the failed rows so the next request retries them
         with _last_saved_lock:
-            for row in rows[sent:]:
-                _last_saved.pop(row["id"], None)
+            for row in rows:
+                if row["id"] not in saved_ids:
+                    _last_saved.pop(row["id"], None)
         logging.warning(f"Saving served jobs failed: {type(e).__name__}")
 
     return sent
+
+
+# =====================================================
+# FRESHER CLASSIFICATIONS (see fresher_ai.py)
+# =====================================================
+
+def load_classifications(job_ids: List[str], version: int) -> Dict[str, dict]:
+    """Stored AI classifications for these jobs, by id. Never raises."""
+
+    client = get_supabase()
+    ids = [str(i).lower() for i in job_ids if i]
+    if client is None or not ids:
+        return {}
+
+    found: Dict[str, dict] = {}
+    try:
+        for start in range(0, len(ids), UPSERT_BATCH):
+            rows = (
+                client.table("jobs")
+                .select("id,fresher_friendly,min_years,grad_batches,fresher_confidence")
+                .in_("id", ids[start:start + UPSERT_BATCH])
+                .eq("classification_version", version)
+                .execute()
+                .data
+            )
+            for row in rows:
+                if row.get("fresher_friendly") is None:
+                    continue
+                found[row["id"]] = {
+                    "fresher": bool(row["fresher_friendly"]),
+                    "min_years": float(row["min_years"]) if row.get("min_years") is not None else None,
+                    "batches": [int(b) for b in row.get("grad_batches") or []],
+                    "confidence": float(row.get("fresher_confidence") or 0),
+                }
+    except Exception as e:
+        logging.warning(f"Loading job classifications failed: {type(e).__name__}")
+
+    return found
+
+
+def save_classifications(results: List[tuple], version: int) -> None:
+    """results: [(job, classification)]. Upserts the job row with its
+    classification (inserting it if it isn't saved yet). Never raises."""
+
+    client = get_supabase()
+    if client is None:
+        return
+
+    now_iso = datetime.now(timezone.utc).isoformat()
+    rows = []
+    for job, result in results:
+        row = job_row(job)
+        if row is None:
+            continue
+        row.update({
+            "fresher_friendly": result["fresher"],
+            "is_new_grad": result["fresher"],
+            "min_years": result["min_years"],
+            "grad_batches": result["batches"],
+            "fresher_confidence": result["confidence"],
+            "classification_version": version,
+            "classified_at": now_iso,
+        })
+        rows.append(row)
+
+    try:
+        for start in range(0, len(rows), UPSERT_BATCH):
+            client.table("jobs").upsert(rows[start:start + UPSERT_BATCH], on_conflict="source,external_id").execute()
+    except Exception as e:
+        logging.warning(f"Saving job classifications failed: {type(e).__name__}")
 
 
 # =====================================================
