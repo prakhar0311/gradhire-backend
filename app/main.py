@@ -139,13 +139,37 @@ class RateLimiter:
 limiter = RateLimiter()
 
 
+# Render sits behind Cloudflare, which sets these from the connection itself
+# and overwrites any value a client sends. X-Forwarded-For can't be trusted:
+# Render appends to whatever the client put there.
+TRUSTED_IP_HEADERS = ("cf-connecting-ip", "true-client-ip")
+_ip_source_logged = False
+
+
 def client_ip(request: Request) -> str:
-    # Render's proxy puts the real client first in X-Forwarded-For. It can be
-    # spoofed, which is why AI_GLOBAL_PER_DAY exists as a hard backstop.
-    forwarded = request.headers.get("x-forwarded-for")
-    if forwarded:
-        return forwarded.split(",")[0].strip()
-    return request.client.host if request.client else "unknown"
+    global _ip_source_logged
+    source, ip = "x-forwarded-for", None
+    for header in TRUSTED_IP_HEADERS:
+        value = request.headers.get(header, "").strip()
+        if value:
+            source, ip = header, value
+            break
+
+    if ip is None:
+        # Fallback (e.g. running locally): first entry, spoofable; the global
+        # daily AI cap is the backstop
+        forwarded = request.headers.get("x-forwarded-for")
+        if forwarded:
+            ip = forwarded.split(",")[0].strip()
+        else:
+            source, ip = "connection", request.client.host if request.client else "unknown"
+
+    # Once per process, which header is in use (the name only, never the IP)
+    if not _ip_source_logged:
+        _ip_source_logged = True
+        logging.warning(f"Client IP source: {source}")
+
+    return ip[:64]
 
 
 def enforce_ai_limits(request: Request, user_id: Optional[str] = None):
